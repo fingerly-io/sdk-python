@@ -192,12 +192,19 @@ owns that loop.
 ## Development and release preparation
 
 ```sh
-uv venv --python 3.9 && uv pip install -e ".[dev]"
-.venv/bin/ruff check .
-.venv/bin/mypy
-.venv/bin/pytest
-.venv/bin/python scripts/sync_contract.py --check
+uv sync                                     # 3.9 per .python-version, dev group included
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+uv run pytest
+uv run python scripts/sync_contract.py --check
+uv build                                    # wheel and sdist
 ```
+
+`uv sync` reads the `dev` dependency group, so there is nothing else to install.
+`.python-version` pins the development interpreter to 3.9, the oldest supported
+runtime, so the floor is exercised locally rather than only in CI. `uv.lock` is
+committed; CI installs with `uv sync --frozen`.
 
 The vendored synthetic contract snapshot makes tests independent of sibling
 repositories. To update it from the integration workspace, set

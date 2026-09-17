@@ -1,0 +1,29 @@
+name: Python SDK
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # 3.9 is the supported floor; the newest release guards against drift.
+        python: ["3.9", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --python ${{ matrix.python }}
+      - run: uv run --python ${{ matrix.python }} ruff format --check .
+      - run: uv run --python ${{ matrix.python }} ruff check .
+      - run: uv run --python ${{ matrix.python }} mypy
+      - run: uv run --python ${{ matrix.python }} pytest
+      - run: uv run --python ${{ matrix.python }} python scripts/sync_contract.py --check
+      - run: uv build --out-dir artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-sdk-${{ matrix.python }}
+          path: artifacts/*
