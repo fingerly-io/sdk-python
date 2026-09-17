@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fingerly"
+version = "0.1.0"
+description = "Server-side Fingerly SDK for event reads and webhook verification"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "UNLICENSED" }
+authors = [{ name = "Fingerly" }]
+keywords = ["fingerly", "fraud", "device-fingerprinting", "bot-detection"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
+dependencies = ["httpx>=0.27,<1"]
+
+[project.urls]
+Documentation = "https://docs.fingerly.io/docs/sdks/python"
+
+[dependency-groups]
+dev = [
+  "jsonschema>=4.23",
+  "mypy>=1.13",
+  "pytest>=8.3",
+  "types-jsonschema>=4.23",
+  "ruff>=0.8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fingerly"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]
+
+[tool.mypy]
+python_version = "3.9"
+files = ["src", "tests"]
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+# verify_webhook promises never to raise, so it guards types that its own
+# signature already rules out. Those guards protect callers who hand it
+# whatever a web framework returned, which is not statically typed.
+module = "fingerly._webhooks"
+warn_unreachable = false
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "S", "A", "C4", "RET", "SIM", "PTH", "RUF"]
+ignore = ["S101"]
+
+[tool.ruff.lint.pyupgrade]
+# `from __future__ import annotations` makes PEP 604 syntax parse on 3.9, but
+# `typing.get_type_hints()` still fails on it there, and doc generators call it
+# against this package's public dataclasses. Keep `Optional[X]` and `Dict[K, V]`.
+keep-runtime-typing = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106"]
