@@ -1,9 +1,12 @@
 # fingerly
 
-Server-side event reads and webhook verification for Python. Two clients share
-one API: `Fingerly` for synchronous code such as Django and Flask, and
-`AsyncFingerly` for asyncio code such as FastAPI and Starlette. Python 3.9 or
-newer. One runtime dependency, `httpx`. Version 0.1.0 is prepared for release;
+Server-side event reads, webhook verification and a same-origin proxy for
+Python. Two clients share one API: `Fingerly` for synchronous code such as
+Django and Flask, and `AsyncFingerly` for asyncio code such as FastAPI and
+Starlette. Python 3.9 or newer. One runtime dependency, `httpx`. The proxy
+serves both ASGI and WSGI, so it mounts under either.
+
+Version 0.1.0 is prepared for release;
 the repository is private and the PyPI package has not been published.
 
 ```python
@@ -92,14 +95,92 @@ event loop for `AsyncFingerly`.
 | Calls | `fingerly.events.get(id)` | `await fingerly.events.get(id)` |
 | Closing | `fingerly.close()` or `with Fingerly(...) as fingerly:` | `await fingerly.aclose()` or `async with AsyncFingerly(...) as fingerly:` |
 
-## No same-origin proxy
+## Same-origin proxy
 
-The Node SDK ships `createProxy`, a first-party proxy that keeps content
-blockers from refusing identification. It is written against the web `Request`
-and `Response` standard, which every JavaScript server runtime implements;
-Python has no single equivalent. Serve the proxy from a Cloudflare Worker or a
-Node runtime, or build one against the contract in
-[proxy integrations](https://docs.fingerly.io/docs/proxy-integrations).
+Content blockers refuse browser requests to third-party APIs, and a refused
+identification is a visitor never identified. Mount the proxy on a path of your
+own site and those requests become first-party. The proxy key is what lets that
+hop declare the visitor's real address, origin and user agent; a public key
+alone never can, so nobody can spoof them.
+
+One `FingerlyProxy` holds the configuration and exposes both server standards,
+so a project running each gets the same behaviour from one instance.
+
+```python
+from fingerly import FingerlyProxy
+
+proxy = FingerlyProxy(
+    proxy_key=os.environ["FINGERLY_PROXY_KEY"],
+    prefix="/metrics",
+    client_ip=lambda request: request.headers["cf-connecting-ip"],
+)
+```
+
+`prefix` is the path the proxy is mounted under, and it must match the mount:
+the proxy checks the whole request path, so a proxy built with
+`prefix="/metrics"` mounted at `/fingerly` refuses everything with `404`.
+Choose a neutral path. Blockers look for words such as `fingerprint`,
+`tracking` and `fingerly`.
+
+### ASGI: FastAPI, Starlette, Django 3+, Quart, Litestar
+
+```python
+app.mount("/metrics", proxy.asgi)
+```
+
+### WSGI: Flask, Django's sync stack, Pyramid
+
+```python
+from werkzeug.middleware.dispatcher import DispatcherMiddleware
+
+app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/metrics": proxy.wsgi})
+```
+
+Then point the browser SDK at the same path:
+
+```ts
+const fingerly = await load({ apiKey: 'fly_pk_…', endpoints: '/metrics' })
+```
+
+### What the proxy does
+
+It forwards only `POST` to `{prefix}/api/v1/identify` and
+`{prefix}/api/v1/events/{request_id}/supplement`. Anything else gets `404`, and
+any other method gets `405`. Event reads need a secret key and stay unreachable
+from a browser by construction.
+
+The browser must present a public key from the same region and environment as
+the proxy key, or the request gets `401`. Bodies over 1 MiB get `413`, enforced
+while streaming rather than after buffering. Responses are marked `no-store`.
+
+Only the content type, the visitor metadata Fingerly needs, and an
+`idempotency-key` are forwarded. Customer cookies and authorization headers are
+never passed on. Upstream `content-encoding` and `content-length` are dropped
+from the relayed response, because httpx has already decoded the body and those
+headers would no longer describe it.
+
+> **`client_ip` is the one thing you must get right.** Resolve it from a header
+> your own infrastructure sets, such as your load balancer's or CDN's. Never
+> read the left-most `X-Forwarded-For` value: the visitor writes it. The
+> callback is synchronous, because it is called under both standards.
+
+`ProxyRequest` gives the callback `headers` (case-insensitive), `path`, `method`
+and `peer_host`. `peer_host` is the socket peer, which is your load balancer
+rather than the visitor whenever one sits in front of you.
+
+### A note on mount paths
+
+ASGI servers disagree about what `path` holds under a mount. Starlette 0.47 and
+newer leave it whole and report the prefix separately in `root_path`; older
+versions and some routers strip the prefix off it. Both are permitted by the
+spec. The proxy detects which one it is given rather than assuming, so the same
+`prefix` works either way, and `tests/test_frameworks.py` drives real Starlette
+and Flask apps to keep it that way.
+
+### Closing
+
+The proxy opens its upstream connection on first use, one per standard. Close
+whichever you used: `proxy.close()` for WSGI, `await proxy.aclose()` for ASGI.
 
 ## Timeouts
 
@@ -129,10 +210,12 @@ production secrets in fixtures.
 `_client.py` holds both clients and their event reads. `_transport.py` builds
 requests and interprets responses, so the two clients share one definition of
 what a request is and what a failure means. `_models.py` owns `Event`,
-`EventPage` and their parsing. `_webhooks.py` verifies signatures. `_config.py`
-validates every caller-supplied option: keys, origins, API versions and
-durations, all before any network access. `_errors.py` holds the exception
-hierarchy. `__init__.py` only exposes the public API.
+`EventPage` and their parsing. `_webhooks.py` verifies signatures. `_proxy.py`
+owns every proxy decision, with `_asgi.py` and `_wsgi.py` as thin adapters that
+only read a request and write a response, so the two standards cannot drift
+apart. `_config.py` validates every caller-supplied option: keys, origins, API
+versions and durations, all before any network access. `_errors.py` holds the
+exception hierarchy. `__init__.py` only exposes the public API.
 
 ### API version
 
