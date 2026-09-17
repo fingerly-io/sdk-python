@@ -29,11 +29,15 @@ Documentation = "https://docs.fingerly.io/docs/sdks/python"
 
 [dependency-groups]
 dev = [
+  # Starlette and Flask are exercised directly: ASGI servers disagree about
+  # what `path` holds under a mount, and a hand-rolled driver cannot catch it.
+  "flask>=3.0",
   "jsonschema>=4.23",
   "mypy>=1.13",
   "pytest>=8.3",
   "types-jsonschema>=4.23",
   "ruff>=0.8",
+  "starlette>=0.40",
 ]
 
 [tool.hatch.build.targets.wheel]
