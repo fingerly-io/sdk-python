@@ -43,20 +43,22 @@ treated as zero. `Event` declares every documented field as an attribute and
 falls back to the decoded body for fields added later, so a new server field
 needs no SDK upgrade.
 
-## Wait for a fresh identification
+## Read an event you just identified
 
-Identification returns before archival and warehouse insertion. To wait for a
-newly identified event, opt in to bounded polling:
+An event is readable as soon as identification answers, so this needs nothing
+special:
 
 ```python
-event = fingerly.events.wait_for(request_id, timeout=10.0, interval=0.25)
-event = await fingerly.events.wait_for(request_id, timeout=10.0, interval=0.25)
+event = fingerly.events.get(request_id)
+event = await fingerly.events.get(request_id)
 ```
 
-Only a structured `404 event_not_found` is retried. Other HTTP and transport
-errors fail immediately. A missing event at the deadline raises
-`FingerlyTimeoutError` with `operation="event_wait"`. Cancelling the awaiting
-task stops the asyncio version at once.
+Earlier versions had a `wait_for` that polled through the gap between
+identification and the event becoming queryable. There is no gap, so a
+`404 event_not_found` now means a request id that was never issued.
+
+The archived `document` arrives moments after the event itself, so check
+`has_document` rather than assuming it is there.
 
 ## Verify a backend action
 
@@ -200,8 +202,7 @@ whichever you used: `proxy.close()` for WSGI, `await proxy.aclose()` for ASGI.
 
 `timeout` is passed to `httpx` and applies per connect, read, write and pool
 operation, which is the Python convention. It is not a single deadline over the
-whole request. `wait_for`'s `timeout` *is* a total deadline, because the SDK
-owns that loop.
+whole request.
 
 ## Development and release preparation
 

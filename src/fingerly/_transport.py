@@ -150,15 +150,6 @@ def api_error(status: int, body: bytes, secret_key: str) -> FingerlyAPIError:
     )
 
 
-def is_pending_event(error: BaseException) -> bool:
-    """True for the one retryable failure: the event has not landed yet."""
-    return (
-        isinstance(error, FingerlyAPIError)
-        and error.status == 404
-        and error.code == "event_not_found"
-    )
-
-
 def _redact(value: str, secret_key: str) -> str:
     """Strips the secret key from anything an error may carry to logs."""
     return value.replace(secret_key, _REDACTED) if secret_key else value

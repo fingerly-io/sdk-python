@@ -14,21 +14,14 @@ class FingerlyError(Exception):
 
 
 class FingerlyTimeoutError(FingerlyError):
-    """Raised when an operation does not finish within its time limit.
+    """Raised when a request does not finish within its time limit.
 
-    Attributes:
-        operation: ``event_wait`` for ``events.wait_for`` polling, ``request``
-            for a single HTTP request.
+    The deadline covers reading the response body, so an API that answers and
+    then stalls arrives here just as one that never answered does.
     """
 
-    def __init__(self, operation: str = "request") -> None:
-        message = (
-            "Timed out waiting for the event"
-            if operation == "event_wait"
-            else "Fingerly request timed out"
-        )
-        super().__init__(message)
-        self.operation = operation
+    def __init__(self) -> None:
+        super().__init__("Fingerly request timed out")
 
 
 class FingerlyConnectionError(FingerlyError):

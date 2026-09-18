@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import time
 from collections.abc import Mapping
 from datetime import datetime
 from types import TracebackType
@@ -25,13 +23,10 @@ from ._transport import (
     decode_json,
     event_path,
     headers_for,
-    is_pending_event,
     list_params,
 )
 
 DEFAULT_TIMEOUT = 10.0
-DEFAULT_WAIT_TIMEOUT = 10.0
-DEFAULT_WAIT_INTERVAL = 0.25
 
 _Self = TypeVar("_Self", bound="_BaseFingerly")
 
@@ -92,8 +87,9 @@ class Events:
             request_id: The ``request_id`` returned by identification.
 
         Raises:
-            FingerlyAPIError: ``404 event_not_found`` if it is not stored yet;
-                use :meth:`wait_for` right after identifying a visitor.
+            FingerlyAPIError: ``404 event_not_found`` when there is no such
+                event. One is readable as soon as identification answers, so
+                this means a request id that was never issued.
             FingerlyTimeoutError: If the request exceeds the client timeout.
         """
         return parse_event(self._client._request(event_path(request_id)))
@@ -124,40 +120,6 @@ class Events:
         params = list_params(from_, to, page, limit, visitor, level)
         return parse_page(self._client._request("/events", params))
 
-    def wait_for(
-        self,
-        request_id: str,
-        timeout: float = DEFAULT_WAIT_TIMEOUT,
-        interval: float = DEFAULT_WAIT_INTERVAL,
-    ) -> Event:
-        """Polls until a newly identified event becomes readable.
-
-        Identification answers before the event is archived, so opt in to this
-        only when you have just identified a visitor. Only a structured
-        ``404 event_not_found`` is retried; every other failure propagates at
-        once.
-
-        Args:
-            request_id: The ``request_id`` returned by identification.
-            timeout: Total time to wait, in seconds.
-            interval: Delay between polls, in seconds.
-
-        Raises:
-            FingerlyTimeoutError: With ``operation='event_wait'`` if the event
-                is still missing at the deadline.
-        """
-        positive_seconds(interval, "interval")
-        deadline = time.monotonic() + positive_seconds(timeout, "timeout")
-        while True:
-            try:
-                return self.get(request_id)
-            except Exception as error:
-                if not is_pending_event(error):
-                    raise
-            if time.monotonic() + interval >= deadline:
-                raise FingerlyTimeoutError("event_wait")
-            time.sleep(interval)
-
 
 class AsyncEvents:
     """Asyncio event reads. Reached as ``fingerly.events``."""
@@ -187,30 +149,6 @@ class AsyncEvents:
         """
         params = list_params(from_, to, page, limit, visitor, level)
         return parse_page(await self._client._request("/events", params))
-
-    async def wait_for(
-        self,
-        request_id: str,
-        timeout: float = DEFAULT_WAIT_TIMEOUT,
-        interval: float = DEFAULT_WAIT_INTERVAL,
-    ) -> Event:
-        """Polls until a newly identified event becomes readable.
-
-        See :meth:`Events.wait_for`. Cancelling the awaiting task stops the
-        polling immediately.
-        """
-        positive_seconds(interval, "interval")
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + positive_seconds(timeout, "timeout")
-        while True:
-            try:
-                return await self.get(request_id)
-            except Exception as error:
-                if not is_pending_event(error):
-                    raise
-            if loop.time() + interval >= deadline:
-                raise FingerlyTimeoutError("event_wait")
-            await asyncio.sleep(interval)
 
 
 class Fingerly(_BaseFingerly):
@@ -277,7 +215,7 @@ class Fingerly(_BaseFingerly):
         try:
             response = self._http.get(path, params=params)
         except httpx.TimeoutException as error:
-            raise FingerlyTimeoutError("request") from error
+            raise FingerlyTimeoutError() from error
         except httpx.HTTPError as error:
             raise FingerlyConnectionError("Could not reach the Fingerly API") from error
         return self._interpret(response)
@@ -346,7 +284,7 @@ class AsyncFingerly(_BaseFingerly):
         try:
             response = await self._http.get(path, params=params)
         except httpx.TimeoutException as error:
-            raise FingerlyTimeoutError("request") from error
+            raise FingerlyTimeoutError() from error
         except httpx.HTTPError as error:
             raise FingerlyConnectionError("Could not reach the Fingerly API") from error
         return self._interpret(response)

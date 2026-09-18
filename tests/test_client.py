@@ -247,32 +247,24 @@ class TestErrors:
         assert recorder.calls == 2
 
 
-class TestWaitFor:
-    def test_polls_through_structured_misses_until_the_event_exists(self) -> None:
-        recorder = Recorder(
-            error_response("event_not_found", 404),
-            error_response("event_not_found", 404),
-            json_response(event_body()),
-        )
-        with client(recorder) as fingerly:
-            event = fingerly.events.wait_for("id", interval=0.001)
-        assert event.request_id == "0199a963-e400-7000-8000-000000000001"
-        assert recorder.calls == 3
+class TestMissingEvent:
+    """An event is readable as soon as identification answers, so a missing
+    one means a request id that was never issued: reported at once, in one
+    request, rather than waited through."""
 
-    def test_bounds_a_permanently_missing_event(self) -> None:
+    def test_reports_a_missing_event_without_retrying(self) -> None:
         recorder = Recorder(error_response("event_not_found", 404))
-        with (
-            client(recorder) as fingerly,
-            pytest.raises(FingerlyTimeoutError) as caught,
-        ):
-            fingerly.events.wait_for("id", timeout=0.05, interval=0.01)
-        assert caught.value.operation == "event_wait"
+        with client(recorder) as fingerly, pytest.raises(FingerlyAPIError) as caught:
+            fingerly.events.get("id")
+        assert caught.value.status == 404
+        assert caught.value.code == "event_not_found"
+        assert recorder.calls == 1
 
     @pytest.mark.parametrize("status", [400, 401, 403, 429, 500, 404])
-    def test_does_not_retry_other_failures(self, status: int) -> None:
+    def test_propagates_every_other_failure(self, status: int) -> None:
         recorder = Recorder(error_response("other", status))
         with client(recorder) as fingerly, pytest.raises(FingerlyAPIError) as caught:
-            fingerly.events.wait_for("id", interval=0.001)
+            fingerly.events.get("id")
         assert caught.value.status == status
         assert recorder.calls == 1
 
@@ -296,16 +288,6 @@ class TestAsyncParity:
             "https://us.api.fingerly.io/api/v1/events/request-1",
             "https://us.api.fingerly.io/api/v1/events?page=1&limit=10&level=high",
         ]
-
-    def test_async_wait_for_bounds_a_missing_event(self) -> None:
-        async def wait() -> None:
-            recorder = Recorder(error_response("event_not_found", 404))
-            async with async_client(recorder) as fingerly:
-                await fingerly.events.wait_for("id", timeout=0.05, interval=0.01)
-
-        with pytest.raises(FingerlyTimeoutError) as caught:
-            run(wait())
-        assert caught.value.operation == "event_wait"
 
     def test_async_surfaces_api_errors_identically(self) -> None:
         async def read() -> None:
