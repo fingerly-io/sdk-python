@@ -95,7 +95,8 @@ class ProxyRequest:
 
     Attributes:
         method: The HTTP method.
-        path: The full request path, including the mount prefix.
+        path: The request path as the mounted application sees it, with
+            anything the server reported separately as a mount prefix removed.
         headers: Case-insensitive request headers.
         peer_host: The socket peer's address, when the server reports one.
             This is your load balancer, not the visitor, whenever one is in
@@ -192,7 +193,9 @@ class FingerlyProxy:
                 be synchronous.
             proxy_key: A proxy key, ``fly_px_…``, held only on your server.
             secret_key: Deprecated alternative to ``proxy_key``.
-            prefix: The path the proxy is mounted under.
+            prefix: The path the proxy answers under, within the
+                application. It excludes anything a sub-URI deployment adds,
+                and is accepted as either present or already stripped.
             api_version: Version accepted locally and forwarded upstream.
             upstream: Overrides the API origin implied by the key.
             max_body_bytes: Larger request bodies are refused with 413.
@@ -346,14 +349,23 @@ class FingerlyProxy:
     def _route_for(self, path: str) -> Optional[str]:
         """Maps a local path to its upstream path.
 
+        The prefix is tolerated as either present or already stripped, so the
+        handler works whether the server reported the whole path or only what
+        followed the mount. Both adapters hand over the application-relative
+        path, and which of the two shapes that is depends on how the
+        application mounted this.
+
         Returns:
             The upstream path, or None when the route is not proxyable.
         """
         versioned = f"/api/{self._api_version}"
         mount = self._prefix + versioned
-        if not path.startswith(mount + "/"):
+        if path.startswith(mount + "/"):
+            resource = path[len(mount) :]
+        elif path.startswith(versioned + "/"):
+            resource = path[len(versioned) :]
+        else:
             return None
-        resource = path[len(mount) :]
         if resource != _IDENTIFY and not _is_supplement(resource):
             return None
         return versioned + resource

@@ -116,9 +116,11 @@ proxy = FingerlyProxy(
 )
 ```
 
-`prefix` is the path the proxy is mounted under, and it must match the mount:
-the proxy checks the whole request path, so a proxy built with
-`prefix="/metrics"` mounted at `/fingerly` refuses everything with `404`.
+`prefix` is the path the proxy answers under, within your application, and it
+must match the mount: a proxy built with `prefix="/metrics"` mounted at
+`/fingerly` refuses everything with `404`. It excludes anything a sub-URI
+deployment adds, and a prefix the mount has already stripped works too, so the
+same configuration serves an app at the root and one served from `/shop`.
 Choose a neutral path. Blockers look for words such as `fingerprint`,
 `tracking` and `fingerly`.
 
@@ -170,12 +172,24 @@ rather than the visitor whenever one sits in front of you.
 
 ### A note on mount paths
 
-ASGI servers disagree about what `path` holds under a mount. Starlette 0.47 and
-newer leave it whole and report the prefix separately in `root_path`; older
-versions and some routers strip the prefix off it. Both are permitted by the
-spec. The proxy detects which one it is given rather than assuming, so the same
-`prefix` works either way, and `tests/test_frameworks.py` drives real Starlette
-and Flask apps to keep it that way.
+Both adapters match the path as the mounted application sees it: `PATH_INFO`
+under WSGI, and under ASGI the `path` with `root_path` removed when it is still
+carrying it.
+
+That last part needs care. ASGI servers disagree about what `path` holds under
+a mount: Starlette 0.47 and newer leave it whole and report the prefix
+separately in `root_path`, while older versions and some routers strip the
+prefix off it. Both are permitted by the spec, so the proxy detects which one
+it was given rather than assuming.
+
+Taking the application-relative path rather than the whole one is what makes a
+sub-URI deployment work. There, `root_path` or `SCRIPT_NAME` carries a prefix
+that belongs to the deployment and that your `prefix` knows nothing about, so a
+proxy matching on the whole path would refuse every request. It is the same
+rule Rack's `PATH_INFO` and ASP.NET Core's `Request.Path` already follow.
+
+`tests/test_frameworks.py` drives real Starlette and Flask apps, mounted plainly
+and again under a sub-URI, to keep all of it that way.
 
 ### Closing
 

@@ -53,12 +53,15 @@ class WSGIProxy:
 def _request_from(environ: Environ) -> ProxyRequest:
     """Builds the neutral request from a WSGI environ.
 
-    ``SCRIPT_NAME`` carries the mount prefix and ``PATH_INFO`` the rest, so
-    joining them gives the same full path an ASGI server reports.
+    ``PATH_INFO`` alone, never ``SCRIPT_NAME + PATH_INFO``. WSGI puts the
+    mount in ``SCRIPT_NAME``, so ``PATH_INFO`` is already what the mounted
+    application sees, and a deployment under a sub-URI puts its own prefix
+    there too. Joining them would mean a Flask app served from ``/shop`` never
+    matched a proxy configured for ``/metrics``.
     """
     return ProxyRequest(
         method=environ.get("REQUEST_METHOD", ""),
-        path=environ.get("SCRIPT_NAME", "") + environ.get("PATH_INFO", ""),
+        path=environ.get("PATH_INFO", ""),
         headers=_headers_from(environ),
         peer_host=environ.get("REMOTE_ADDR"),
     )

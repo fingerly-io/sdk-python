@@ -88,6 +88,34 @@ class TestStarlette:
         assert forwarded.headers["x-fingerly-proxy-key"] == PROXY_KEY
         assert "cookie" not in forwarded.headers
 
+    def test_forwards_from_a_deployment_under_a_sub_uri(self) -> None:
+        # Nested mounts, which is what a sub-URI deployment looks like: the
+        # outer prefix belongs to the deployment and the proxy's configuration
+        # knows nothing about it.
+        upstream = Upstream()
+        inner = starlette_applications.Starlette(
+            routes=[starlette_routing.Mount("/metrics", app=build(upstream).asgi)]
+        )
+        app = starlette_applications.Starlette(
+            routes=[starlette_routing.Mount("/shop", app=inner)]
+        )
+
+        async def drive() -> httpx.Response:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="https://shop.test"
+            ) as client:
+                return await client.post(
+                    "/shop/metrics/api/v1/identify",
+                    headers=BROWSER_HEADERS,
+                    content=b'{"signals":{}}',
+                )
+
+        response = run(drive())
+        assert response.status_code == 200
+        assert str(upstream.requests[0].url) == (
+            "https://us.api.fingerly.io/api/v1/identify"
+        )
+
     def test_refuses_event_reads_and_unknown_routes(self) -> None:
         upstream = Upstream()
 
@@ -161,6 +189,33 @@ class TestFlask:
         assert str(forwarded.url) == "https://us.api.fingerly.io/api/v1/identify"
         assert forwarded.headers["x-fingerly-client-ip"] == "203.0.113.5"
         assert "cookie" not in forwarded.headers
+
+    def test_forwards_from_a_deployment_under_a_sub_uri(self) -> None:
+        # DispatcherMiddleware rather than httpx's script_name, because httpx
+        # leaves the mount in PATH_INFO and PEP 3333 does not: a harness that
+        # disagreed with the spec would test the wrong thing.
+        upstream = Upstream()
+        app = flask.Flask(__name__)
+        app.wsgi_app = dispatcher.DispatcherMiddleware(
+            app.wsgi_app, {"/metrics": build(upstream).wsgi}
+        )
+        deployed = dispatcher.DispatcherMiddleware(
+            app.wsgi_app, {"/shop": app.wsgi_app}
+        )
+
+        with httpx.Client(
+            transport=httpx.WSGITransport(app=deployed), base_url="https://shop.test"
+        ) as client:
+            response = client.post(
+                "/shop/metrics/api/v1/identify",
+                headers=BROWSER_HEADERS,
+                content=b'{"signals":{}}',
+            )
+
+        assert response.status_code == 200
+        assert str(upstream.requests[0].url) == (
+            "https://us.api.fingerly.io/api/v1/identify"
+        )
 
     def test_forwards_a_supplement_report(self) -> None:
         upstream = Upstream()

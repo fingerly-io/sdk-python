@@ -240,6 +240,46 @@ class TestForwarding:
         assert (asgi_status, wsgi_status) == (200, 200)
         assert recorder.calls == 2
 
+    def test_serves_a_deployment_under_a_sub_uri(self) -> None:
+        # A sub-URI puts the deployment's own prefix in root_path or
+        # SCRIPT_NAME, and the configured prefix knows nothing about it. The
+        # application-relative path is what both standards agree on.
+        recorder = Recorder(json_response({}))
+        mounted = proxy(recorder, prefix="/metrics")
+        asgi_status, _, _ = call_asgi(
+            mounted.asgi,
+            path="/shop/metrics/api/v1/identify",
+            root_path="/shop",
+            headers={"x-api-key": PUBLIC_KEY},
+        )
+        wsgi_status, _, _ = call_wsgi(
+            mounted.wsgi,
+            path="/metrics/api/v1/identify",
+            script_name="/shop",
+            headers={"x-api-key": PUBLIC_KEY},
+        )
+        assert (asgi_status, wsgi_status) == (200, 200)
+        assert recorder.calls == 2
+
+    def test_serves_a_sub_uri_deployment_that_also_mounts_the_proxy(self) -> None:
+        # Both prefixes in the mount: the proxy sees the stripped form.
+        recorder = Recorder(json_response({}))
+        mounted = proxy(recorder, prefix="/metrics")
+        asgi_status, _, _ = call_asgi(
+            mounted.asgi,
+            path="/shop/metrics/api/v1/identify",
+            root_path="/shop/metrics",
+            headers={"x-api-key": PUBLIC_KEY},
+        )
+        wsgi_status, _, _ = call_wsgi(
+            mounted.wsgi,
+            path="/api/v1/identify",
+            script_name="/shop/metrics",
+            headers={"x-api-key": PUBLIC_KEY},
+        )
+        assert (asgi_status, wsgi_status) == (200, 200)
+        assert recorder.calls == 2
+
     def test_reassembles_a_streamed_asgi_body(self) -> None:
         recorder = Recorder(json_response({}))
         payload = b'{"signals":"' + b"x" * 300 + b'"}'

@@ -66,7 +66,7 @@ def _request_from(scope: Scope) -> ProxyRequest:
     client = scope.get("client")
     return ProxyRequest(
         method=scope.get("method", ""),
-        path=_full_path(scope),
+        path=_app_path(scope),
         headers=Headers(
             (name.decode("latin-1"), value.decode("latin-1"))
             for name, value in scope.get("headers", ())
@@ -75,20 +75,27 @@ def _request_from(scope: Scope) -> ProxyRequest:
     )
 
 
-def _full_path(scope: Scope) -> str:
-    """Recovers the whole request path, including any mount prefix.
+def _app_path(scope: Scope) -> str:
+    """Recovers the request path as the mounted application sees it.
 
     ASGI servers disagree about ``path`` under a mount. Starlette 0.47 and
     newer leave it whole and report the prefix separately in ``root_path``,
     while older versions and some routers strip the prefix off it. Both are
-    permitted, so detect which one this is instead of assuming.
+    permitted, so detect which one this is instead of assuming, and answer
+    with the application-relative path either way.
+
+    Keeping the mount in would break a deployment under a sub-URI, where
+    ``root_path`` also carries a prefix that the configured ``prefix`` knows
+    nothing about. This is the same rule Rack's ``PATH_INFO`` and ASP.NET
+    Core's ``Request.Path`` already follow.
     """
     path = str(scope.get("path", ""))
     root_path = str(scope.get("root_path", ""))
     if not root_path:
         return path
-    already_whole = path == root_path or path.startswith(root_path + "/")
-    return path if already_whole else root_path + path
+    if path == root_path:
+        return "/"
+    return path[len(root_path) :] if path.startswith(root_path + "/") else path
 
 
 async def _read_body(receive: Receive, max_bytes: int) -> Optional[bytes]:
