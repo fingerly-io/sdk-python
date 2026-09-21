@@ -12,10 +12,11 @@ from typing import NamedTuple
 from urllib.parse import urlsplit
 
 #: Anchored with ``\A``/``\Z`` because Python's ``$`` also matches before a
-#: trailing newline, which would let ``"fly_sk_us_production_x\n"`` through.
-_KEY = re.compile(
-    r"\Afly_(pk|sk|px)_(eu|us)_(production|staging|development)_[A-Za-z0-9_-]+\Z"
-)
+#: trailing newline, which would let ``"fly_sk_production_x\n"`` through.
+_KEY = re.compile(r"\Afly_(pk|sk|px)_(production|staging|development)_[A-Za-z0-9_-]+\Z")
+
+#: The one Fingerly API origin.
+DEFAULT_ENDPOINT = "https://api.fingerly.io"
 
 _KEY_LABEL: dict[str, str] = {"pk": "public", "sk": "secret", "px": "proxy"}
 
@@ -23,14 +24,12 @@ _API_VERSION = re.compile(r"\Av[1-9][0-9]*\Z")
 
 
 class KeyScope(NamedTuple):
-    """The region and environment a Fingerly key is scoped to.
+    """The environment a Fingerly key is scoped to.
 
     Attributes:
-        region: ``eu`` or ``us``; selects the regional API host.
         environment: ``production``, ``staging`` or ``development``.
     """
 
-    region: str
     environment: str
 
 
@@ -38,30 +37,19 @@ def parse_key(key: str, expected: str) -> KeyScope:
     """Parses a Fingerly key and asserts it is of the expected kind.
 
     Args:
-        key: The raw key, such as ``fly_sk_us_production_…``.
+        key: The raw key, such as ``fly_sk_production_…``.
         expected: The kind the caller requires: ``pk``, ``sk`` or ``px``.
 
     Returns:
-        The region and environment the key is scoped to.
+        The environment the key is scoped to.
 
     Raises:
         TypeError: If the key is malformed or of another kind.
     """
     match = _KEY.match(key) if isinstance(key, str) else None
     if match is None or match.group(1) != expected:
-        raise TypeError(
-            f"A valid regional Fingerly {_KEY_LABEL[expected]} key is required"
-        )
-    return KeyScope(region=match.group(2), environment=match.group(3))
-
-
-def regional_origin(scope: KeyScope) -> str:
-    """Returns the Fingerly API origin serving a key's region.
-
-    Args:
-        scope: A scope returned by :func:`parse_key`.
-    """
-    return f"https://{scope.region}.api.fingerly.io"
+        raise TypeError(f"A valid Fingerly {_KEY_LABEL[expected]} key is required")
+    return KeyScope(environment=match.group(2))
 
 
 def normalize_endpoint(value: str) -> str:

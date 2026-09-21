@@ -21,7 +21,7 @@ from fingerly import Fingerly, FingerlyAPIError, verify_webhook
 CONTRACT = Path(__file__).resolve().parent.parent / "contract"
 SPEC: dict[str, Any] = json.loads((CONTRACT / "openapi.json").read_text())
 FIXTURES: dict[str, Any] = json.loads((CONTRACT / "fixtures.json").read_text())
-SECRET_KEY = "fly_sk_us_development_contract"
+SECRET_KEY = "fly_sk_development_contract"
 
 # The OpenAPI document declares no $schema, so name the dialect explicitly.
 _REGISTRY = Registry().with_resource(

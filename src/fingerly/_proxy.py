@@ -24,13 +24,13 @@ if TYPE_CHECKING:  # Imported for typing only; the adapters import this module.
     from ._wsgi import WSGIProxy
 
 from ._config import (
+    DEFAULT_ENDPOINT,
     KeyScope,
     normalize_api_version,
     normalize_endpoint,
     parse_key,
     positive_int,
     positive_seconds,
-    regional_origin,
 )
 
 DEFAULT_PREFIX = "/api/fingerly"
@@ -219,7 +219,7 @@ class FingerlyProxy:
             self._key, "px" if self._uses_proxy_key else "sk"
         )
         self._upstream = normalize_endpoint(
-            upstream if upstream is not None else regional_origin(self._scope)
+            upstream if upstream is not None else DEFAULT_ENDPOINT
         )
         self._api_version = normalize_api_version(api_version)
         self._prefix = _normalize_prefix(prefix)
@@ -374,8 +374,8 @@ class FingerlyProxy:
         """Decides which key to present upstream.
 
         With a proxy key the browser must supply a public key for the same
-        region and environment, which the proxy forwards alongside its own.
-        The deprecated secret-key mode authenticates on its own.
+        environment, which the proxy forwards alongside its own. The
+        deprecated secret-key mode authenticates on its own.
 
         Returns:
             The key to forward, or None when the caller is unauthorised.
@@ -386,11 +386,7 @@ class FingerlyProxy:
             browser = parse_key(presented or "", "pk")
         except TypeError:
             return None
-        same_deployment = (
-            browser.region == self._scope.region
-            and browser.environment == self._scope.environment
-        )
-        return presented if same_deployment else None
+        return presented if browser.environment == self._scope.environment else None
 
     def _client(self) -> httpx.Client:
         """Builds the synchronous upstream client on first use."""

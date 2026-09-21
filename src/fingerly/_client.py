@@ -10,11 +10,11 @@ from typing import Any, Optional, TypeVar, Union
 import httpx
 
 from ._config import (
+    DEFAULT_ENDPOINT,
     normalize_api_version,
     normalize_endpoint,
     parse_key,
     positive_seconds,
-    regional_origin,
 )
 from ._errors import FingerlyConnectionError, FingerlyTimeoutError
 from ._models import Event, EventPage, parse_event, parse_page
@@ -44,9 +44,9 @@ class _BaseFingerly:
         """Validates every option before any client is built.
 
         Args:
-            secret_key: A server-only key, ``fly_sk_{eu|us}_{environment}_…``.
-                Its prefix selects the regional API and the environment read.
-            endpoint: Overrides the regional origin, for a local API.
+            secret_key: A server-only key, ``fly_sk_{environment}_…``. Its
+                prefix names the environment read.
+            endpoint: Overrides the Fingerly API origin, for a local API.
             timeout: Per-request timeout in seconds.
             api_version: API route version; the server must support it.
 
@@ -55,10 +55,8 @@ class _BaseFingerly:
         """
         # Validate the key even when an endpoint is given, so a public, proxy
         # or management key can never reach an API that would accept it.
-        scope = parse_key(secret_key, "sk")
-        origin = (
-            regional_origin(scope) if endpoint is None else normalize_endpoint(endpoint)
-        )
+        parse_key(secret_key, "sk")
+        origin = DEFAULT_ENDPOINT if endpoint is None else normalize_endpoint(endpoint)
         self._secret_key = secret_key
         self._base_url = f"{origin}/api/{normalize_api_version(api_version)}"
         self._timeout = positive_seconds(timeout, "timeout")

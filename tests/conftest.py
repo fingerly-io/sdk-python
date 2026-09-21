@@ -9,7 +9,7 @@ from typing import Any, Callable, Optional, TypeVar, cast
 
 import httpx
 
-SECRET_KEY = "fly_sk_us_development_test"
+SECRET_KEY = "fly_sk_development_test"
 
 T = TypeVar("T")
 

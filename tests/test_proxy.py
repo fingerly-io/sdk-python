@@ -17,8 +17,8 @@ from conftest import Recorder, json_response, run
 
 from fingerly import FingerlyProxy, ProxyRequest
 
-PROXY_KEY = "fly_px_us_development_test"
-PUBLIC_KEY = "fly_pk_us_development_test"
+PROXY_KEY = "fly_px_development_test"
+PUBLIC_KEY = "fly_pk_development_test"
 IDENTIFY = "/api/fingerly/api/v1/identify"
 SUPPLEMENT = "/api/fingerly/api/v1/events/request-1/supplement"
 
@@ -146,7 +146,7 @@ class TestConstruction:
             FingerlyProxy(client_ip=None, proxy_key=PROXY_KEY)  # type: ignore[arg-type]
 
     def test_rejects_a_key_of_the_wrong_kind(self) -> None:
-        for key in [PUBLIC_KEY, "fly_sk_us_development_test", "nonsense"]:
+        for key in [PUBLIC_KEY, "fly_sk_development_test", "nonsense"]:
             with pytest.raises(TypeError):
                 FingerlyProxy(client_ip=lambda request: "", proxy_key=key)
 
@@ -173,7 +173,7 @@ class TestForwarding:
             assert status == 200
             assert body == b'{"ok": 1}'
         assert [str(request.url) for request in recorder.requests] == [
-            f"https://us.api.fingerly.io{path.replace('/api/fingerly', '')}"
+            f"https://api.fingerly.io{path.replace('/api/fingerly', '')}"
         ] * 2
 
     def test_sends_only_vetted_visitor_metadata(self) -> None:
@@ -325,9 +325,8 @@ class TestRefusals:
         [
             None,
             "",
-            "fly_pk_eu_development_test",
-            "fly_pk_us_production_test",
-            "fly_sk_us_development_test",
+            "fly_pk_production_test",
+            "fly_sk_development_test",
             "invalid",
         ],
     )
@@ -415,14 +414,12 @@ class TestClientIp:
 class TestDeprecatedSecretKey:
     def test_forwards_the_secret_key_without_a_public_key(self) -> None:
         recorder = Recorder(json_response({}))
-        legacy = proxy(
-            recorder, proxy_key=None, secret_key="fly_sk_us_development_test"
-        )
+        legacy = proxy(recorder, proxy_key=None, secret_key="fly_sk_development_test")
         for adapter, call in both(legacy):
             status, _, _ = call(adapter, headers={})
             assert status == 200
         for upstream in recorder.requests:
-            assert upstream.headers["x-api-key"] == "fly_sk_us_development_test"
+            assert upstream.headers["x-api-key"] == "fly_sk_development_test"
             assert "x-fingerly-proxy-key" not in upstream.headers
 
 

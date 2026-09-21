@@ -26,8 +26,8 @@ async with AsyncFingerly(secret_key=os.environ["FINGERLY_SECRET_KEY"]) as finger
     event = await fingerly.events.get(request_id)
 ```
 
-Event reads require `fly_sk_{eu|us}_{production|staging|development}_…` keys.
-The key selects the regional endpoint; `endpoint` overrides it for a local API.
+Event reads require `fly_sk_{production|staging|development}_…` keys. Requests
+go to `https://api.fingerly.io`; `endpoint` overrides that for a local API.
 Public, proxy, management, malformed and unsupported keys are rejected before
 network access. Requests do not follow redirects. `get` and `list` each perform
 one request and never retry.
@@ -153,8 +153,8 @@ It forwards only `POST` to `{prefix}/api/v1/identify` and
 any other method gets `405`. Event reads need a secret key and stay unreachable
 from a browser by construction.
 
-The browser must present a public key from the same region and environment as
-the proxy key, or the request gets `401`. Bodies over 1 MiB get `413`, enforced
+The browser must present a public key from the same environment as the proxy
+key, or the request gets `401`. Bodies over 1 MiB get `413`, enforced
 while streaming rather than after buffering. Responses are marked `no-store`.
 
 Only the content type, the visitor metadata Fingerly needs, and an

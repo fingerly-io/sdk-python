@@ -41,29 +41,26 @@ class TestConstruction:
     def test_rejects_unsupported_keys_before_networking(self) -> None:
         for secret_key in [
             "not-a-fingerly-key",
-            "fly_pk_eu_production_test",
-            "fly_px_us_development_test",
-            "fly_mk_us_test",
-            "fly_sk_eu_unknown_test",
-            "fly_sk_us_production_",
-            "fly_sk_us_production_test\n",
+            "fly_pk_production_test",
+            "fly_px_development_test",
+            "fly_mk_test",
+            "fly_sk_unknown_test",
+            "fly_sk_production_",
+            "fly_sk_production_test\n",
         ]:
             with pytest.raises(TypeError):
                 Fingerly(secret_key=secret_key, endpoint="https://custom.test")
             with pytest.raises(TypeError):
                 AsyncFingerly(secret_key=secret_key, endpoint="https://custom.test")
 
-    def test_infers_the_regional_endpoint_from_the_key(self) -> None:
-        for region in ["us", "eu"]:
-            recorder = Recorder(json_response(event_body()))
-            with Fingerly(
-                secret_key=f"fly_sk_{region}_development_test",
-                transport=recorder.transport(),
-            ) as fingerly:
-                fingerly.events.get("id/a")
-            assert recorder.url == (
-                f"https://{region}.api.fingerly.io/api/v1/events/id%2Fa"
-            )
+    def test_defaults_to_the_fingerly_api(self) -> None:
+        recorder = Recorder(json_response(event_body()))
+        with Fingerly(
+            secret_key="fly_sk_development_test",
+            transport=recorder.transport(),
+        ) as fingerly:
+            fingerly.events.get("id/a")
+        assert recorder.url == "https://api.fingerly.io/api/v1/events/id%2Fa"
 
     def test_rejects_invalid_endpoints_and_timeouts(self) -> None:
         for endpoint in [
@@ -97,8 +94,8 @@ class TestConstruction:
             fingerly.events.get("request-1")
             fingerly.events.list(limit=10)
         assert [str(request.url) for request in recorder.requests] == [
-            "https://us.api.fingerly.io/api/v2/events/request-1",
-            "https://us.api.fingerly.io/api/v2/events?page=1&limit=10",
+            "https://api.fingerly.io/api/v2/events/request-1",
+            "https://api.fingerly.io/api/v2/events?page=1&limit=10",
         ]
 
     def test_sends_the_secret_key_and_identifies_the_sdk(self) -> None:
@@ -285,8 +282,8 @@ class TestAsyncParity:
         assert event.tag == "checkout:1"
         assert len(page.rows) == 1
         assert [str(request.url) for request in recorder.requests] == [
-            "https://us.api.fingerly.io/api/v1/events/request-1",
-            "https://us.api.fingerly.io/api/v1/events?page=1&limit=10&level=high",
+            "https://api.fingerly.io/api/v1/events/request-1",
+            "https://api.fingerly.io/api/v1/events?page=1&limit=10&level=high",
         ]
 
     def test_async_surfaces_api_errors_identically(self) -> None:

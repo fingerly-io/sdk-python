@@ -21,8 +21,8 @@ starlette_routing = pytest.importorskip("starlette.routing")
 flask = pytest.importorskip("flask")
 dispatcher = pytest.importorskip("werkzeug.middleware.dispatcher")
 
-PROXY_KEY = "fly_px_us_development_test"
-PUBLIC_KEY = "fly_pk_us_development_test"
+PROXY_KEY = "fly_px_development_test"
+PUBLIC_KEY = "fly_pk_development_test"
 BROWSER_HEADERS = {
     "x-api-key": PUBLIC_KEY,
     "origin": "https://shop.test",
@@ -83,7 +83,7 @@ class TestStarlette:
         assert response.headers["cache-control"] == "no-store"
 
         forwarded = upstream.requests[0]
-        assert str(forwarded.url) == "https://us.api.fingerly.io/api/v1/identify"
+        assert str(forwarded.url) == "https://api.fingerly.io/api/v1/identify"
         assert forwarded.headers["x-fingerly-client-ip"] == "203.0.113.5"
         assert forwarded.headers["x-fingerly-proxy-key"] == PROXY_KEY
         assert "cookie" not in forwarded.headers
@@ -113,7 +113,7 @@ class TestStarlette:
         response = run(drive())
         assert response.status_code == 200
         assert str(upstream.requests[0].url) == (
-            "https://us.api.fingerly.io/api/v1/identify"
+            "https://api.fingerly.io/api/v1/identify"
         )
 
     def test_refuses_event_reads_and_unknown_routes(self) -> None:
@@ -144,7 +144,7 @@ class TestStarlette:
             async with self.starlette_client(build(upstream)) as client:
                 response = await client.post(
                     "/metrics/api/v1/identify",
-                    headers={"x-api-key": "fly_pk_eu_production_test"},
+                    headers={"x-api-key": "fly_pk_production_test"},
                     content=b"{}",
                 )
                 return response.status_code
@@ -186,7 +186,7 @@ class TestFlask:
         assert (home.status_code, home.text) == (200, "the host app")
 
         forwarded = upstream.requests[0]
-        assert str(forwarded.url) == "https://us.api.fingerly.io/api/v1/identify"
+        assert str(forwarded.url) == "https://api.fingerly.io/api/v1/identify"
         assert forwarded.headers["x-fingerly-client-ip"] == "203.0.113.5"
         assert "cookie" not in forwarded.headers
 
@@ -214,7 +214,7 @@ class TestFlask:
 
         assert response.status_code == 200
         assert str(upstream.requests[0].url) == (
-            "https://us.api.fingerly.io/api/v1/identify"
+            "https://api.fingerly.io/api/v1/identify"
         )
 
     def test_forwards_a_supplement_report(self) -> None:
@@ -227,7 +227,7 @@ class TestFlask:
             )
         assert response.status_code == 200
         assert str(upstream.requests[0].url) == (
-            "https://us.api.fingerly.io/api/v1/events/request-1/supplement"
+            "https://api.fingerly.io/api/v1/events/request-1/supplement"
         )
 
     def test_refuses_event_reads_and_oversized_bodies(self) -> None:
