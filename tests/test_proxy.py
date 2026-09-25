@@ -15,17 +15,20 @@ import httpx
 import pytest
 from conftest import Recorder, json_response, run
 
+import fingerly
 from fingerly import FingerlyProxy, ProxyRequest
+from fingerly._proxy import PROXY_VERSION
 
 PROXY_KEY = "fly_px_development_test"
 PUBLIC_KEY = "fly_pk_development_test"
-IDENTIFY = "/api/fingerly/api/v1/identify"
-SUPPLEMENT = "/api/fingerly/api/v1/events/request-1/supplement"
+PATH = "/k7x2qm4a"
+INGEST = "https://api.fingerly.io/api/v1/ingest"
 
 
 def proxy(recorder: Recorder, **options: Any) -> FingerlyProxy:
     """A proxy whose upstream calls land in the recorder, under both standards."""
     options.setdefault("proxy_key", PROXY_KEY)
+    options.setdefault("path", PATH)
     options.setdefault("client_ip", lambda request: "203.0.113.10")
     return FingerlyProxy(
         transport=recorder.transport(),
@@ -36,7 +39,7 @@ def proxy(recorder: Recorder, **options: Any) -> FingerlyProxy:
 
 def call_wsgi(
     app: Any,
-    path: str = IDENTIFY,
+    path: str = PATH,
     method: str = "POST",
     headers: Optional[dict[str, str]] = None,
     body: bytes = b"{}",
@@ -69,7 +72,7 @@ def call_wsgi(
 
 def call_asgi(
     app: Any,
-    path: str = IDENTIFY,
+    path: str = PATH,
     method: str = "POST",
     headers: Optional[dict[str, str]] = None,
     body: bytes = b"{}",
@@ -150,10 +153,23 @@ class TestConstruction:
             with pytest.raises(TypeError):
                 FingerlyProxy(client_ip=lambda request: "", proxy_key=key)
 
-    @pytest.mark.parametrize("prefix", ["metrics", "", "/a?b", "/a#b", 7])
-    def test_rejects_an_unusable_prefix(self, prefix: Any) -> None:
+    @pytest.mark.parametrize(
+        "path", ["k7x2qm4a", "", "/", "//", " / ", "/a?b", "/a#b", 7]
+    )
+    def test_rejects_an_unusable_path(self, path: Any) -> None:
         with pytest.raises(TypeError):
-            FingerlyProxy(client_ip=lambda r: "", proxy_key=PROXY_KEY, prefix=prefix)
+            FingerlyProxy(client_ip=lambda r: "", proxy_key=PROXY_KEY, path=path)
+
+    def test_normalizes_trailing_slashes_off_the_path(self) -> None:
+        for adapter, call in both(
+            proxy(recorder := Recorder(json_response({})), path=" /k7x2qm4a// ")
+        ):
+            status, _, _ = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            assert status == 200
+        assert recorder.calls == 2
+
+    def test_reports_the_package_version(self) -> None:
+        assert f"python/{fingerly.__version__}" == PROXY_VERSION
 
     @pytest.mark.parametrize("limits", [{"max_body_bytes": 0}, {"timeout": -1}])
     def test_rejects_unusable_limits(self, limits: dict[str, Any]) -> None:
@@ -162,19 +178,41 @@ class TestConstruction:
 
 
 class TestForwarding:
-    @pytest.mark.parametrize("path", [IDENTIFY, SUPPLEMENT])
-    def test_forwards_both_proxyable_routes(self, path: str) -> None:
+    @pytest.mark.parametrize(
+        "payload", [b'{"signals":{}}', b'{"token":"deferred","signals":{}}']
+    )
+    def test_forwards_both_calls_to_the_one_ingest_url(self, payload: bytes) -> None:
+        # The identification and the deferred report share one path, and the
+        # API tells them apart by the body, so the proxy never looks inside.
         for adapter, call in both(
             proxy(recorder := Recorder(json_response({"ok": 1})))
         ):
             status, _, body = call(
-                adapter, path=path, headers={"x-api-key": PUBLIC_KEY}
+                adapter, headers={"x-api-key": PUBLIC_KEY}, body=payload
             )
             assert status == 200
             assert body == b'{"ok": 1}'
+        assert [str(request.url) for request in recorder.requests] == [INGEST] * 2
+        assert [request.content for request in recorder.requests] == [payload] * 2
+
+    def test_forwards_to_the_configured_versions_ingest_url(self) -> None:
+        recorder = Recorder(json_response({}))
+        for adapter, call in both(proxy(recorder, api_version="v2")):
+            status, _, _ = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            assert status == 200
         assert [str(request.url) for request in recorder.requests] == [
-            f"https://api.fingerly.io{path.replace('/api/fingerly', '')}"
+            "https://api.fingerly.io/api/v2/ingest"
         ] * 2
+
+    def test_answers_whatever_was_routed_to_it_without_a_path(self) -> None:
+        recorder = Recorder(json_response({}))
+        for adapter, call in both(proxy(recorder, path=None)):
+            for path in [PATH, "/anything/at/all", ""]:
+                status, _, _ = call(
+                    adapter, path=path, headers={"x-api-key": PUBLIC_KEY}
+                )
+                assert status == 200
+        assert [str(request.url) for request in recorder.requests] == [INGEST] * 6
 
     def test_sends_only_vetted_visitor_metadata(self) -> None:
         recorder = Recorder(json_response({"request_id": "one"}))
@@ -196,10 +234,11 @@ class TestForwarding:
             assert upstream.headers["x-fingerly-origin"] == "https://shop.test"
             assert upstream.headers["x-fingerly-user-agent"] == "Firefox"
             assert upstream.headers["idempotency-key"] == "idem-1"
+            assert upstream.headers["x-fingerly-proxy-version"] == "python/0.1.0"
             assert "cookie" not in upstream.headers
             assert "authorization" not in upstream.headers
 
-    def test_marks_responses_uncacheable_and_drops_connection_headers(self) -> None:
+    def test_relays_only_the_allowlisted_headers(self) -> None:
         """httpx decodes the body, so replaying content-encoding would lie."""
         plain = b'{"ok":1}'
         upstream = httpx.Response(
@@ -210,31 +249,56 @@ class TestForwarding:
                 "content-encoding": "gzip",
                 "transfer-encoding": "chunked",
                 "cache-control": "public, max-age=600",
+                "ratelimit-limit": "100",
                 "ratelimit-remaining": "99",
+                "retry-after": "3",
+                "x-request-id": "one",
+                "fingerly-balance-micros": "100",
+                "set-cookie": "a=b",
+                "x-powered-by": "fingerly",
             },
         )
         for adapter, call in both(proxy(Recorder(upstream))):
             _, headers, body = call(adapter, headers={"x-api-key": PUBLIC_KEY})
             assert body == plain
-            assert headers["content-length"] == str(len(plain))
-            assert headers["cache-control"] == "no-store"
-            assert headers["ratelimit-remaining"] == "99"
-            assert "content-encoding" not in headers
-            assert "transfer-encoding" not in headers
+            assert headers == {
+                "content-type": "application/json",
+                "ratelimit-limit": "100",
+                "ratelimit-remaining": "99",
+                "retry-after": "3",
+                "x-request-id": "one",
+                "cache-control": "no-store",
+                "content-length": str(len(plain)),
+            }
+            # Nothing relayed may name Fingerly: a blocker can match a header.
+            assert "fingerly" not in " ".join(headers).lower()
+            assert "fingerly" not in " ".join(headers.values()).lower()
 
-    def test_honours_the_mount_prefix_from_either_standard(self) -> None:
+    def test_answers_the_path_with_a_trailing_slash(self) -> None:
         recorder = Recorder(json_response({}))
-        mounted = proxy(recorder, prefix="/metrics")
+        for adapter, call in both(proxy(recorder)):
+            status, _, _ = call(
+                adapter, path=PATH + "/", headers={"x-api-key": PUBLIC_KEY}
+            )
+            assert status == 200
+        assert recorder.calls == 2
+
+    @pytest.mark.parametrize("path", ["", "/"])
+    def test_honours_a_mount_at_the_path_from_either_standard(self, path: str) -> None:
+        # Mounted at its own path, the proxy sees the path already stripped
+        # into root_path or SCRIPT_NAME, with nothing or a slash left over.
+        recorder = Recorder(json_response({}))
+        mounted = proxy(recorder)
         asgi_status, _, _ = call_asgi(
             mounted.asgi,
-            path="/api/v1/identify",
-            root_path="/metrics",
+            path=path,
+            root_path=PATH,
             headers={"x-api-key": PUBLIC_KEY},
         )
         wsgi_status, _, _ = call_wsgi(
             mounted.wsgi,
-            path="/api/v1/identify",
-            script_name="/metrics",
+            path=path,
+            script_name=PATH,
             headers={"x-api-key": PUBLIC_KEY},
         )
         assert (asgi_status, wsgi_status) == (200, 200)
@@ -242,19 +306,19 @@ class TestForwarding:
 
     def test_serves_a_deployment_under_a_sub_uri(self) -> None:
         # A sub-URI puts the deployment's own prefix in root_path or
-        # SCRIPT_NAME, and the configured prefix knows nothing about it. The
+        # SCRIPT_NAME, and the configured path knows nothing about it. The
         # application-relative path is what both standards agree on.
         recorder = Recorder(json_response({}))
-        mounted = proxy(recorder, prefix="/metrics")
+        mounted = proxy(recorder)
         asgi_status, _, _ = call_asgi(
             mounted.asgi,
-            path="/shop/metrics/api/v1/identify",
+            path="/shop" + PATH,
             root_path="/shop",
             headers={"x-api-key": PUBLIC_KEY},
         )
         wsgi_status, _, _ = call_wsgi(
             mounted.wsgi,
-            path="/metrics/api/v1/identify",
+            path=PATH,
             script_name="/shop",
             headers={"x-api-key": PUBLIC_KEY},
         )
@@ -264,17 +328,17 @@ class TestForwarding:
     def test_serves_a_sub_uri_deployment_that_also_mounts_the_proxy(self) -> None:
         # Both prefixes in the mount: the proxy sees the stripped form.
         recorder = Recorder(json_response({}))
-        mounted = proxy(recorder, prefix="/metrics")
+        mounted = proxy(recorder)
         asgi_status, _, _ = call_asgi(
             mounted.asgi,
-            path="/shop/metrics/api/v1/identify",
-            root_path="/shop/metrics",
+            path="/shop" + PATH + "/",
+            root_path="/shop" + PATH,
             headers={"x-api-key": PUBLIC_KEY},
         )
         wsgi_status, _, _ = call_wsgi(
             mounted.wsgi,
-            path="/api/v1/identify",
-            script_name="/shop/metrics",
+            path="",
+            script_name="/shop" + PATH,
             headers={"x-api-key": PUBLIC_KEY},
         )
         assert (asgi_status, wsgi_status) == (200, 200)
@@ -305,18 +369,41 @@ class TestRefusals:
     @pytest.mark.parametrize(
         "path",
         [
-            "/api/fingerly/api/v1/events/request-1",
-            "/api/fingerly/api/v1/events",
-            "/api/fingerly/api/v1/events/a/b/supplement",
-            "/api/fingerly/api/v1/identify/extra",
-            "/api/fingerly/api/v2/identify",
-            "/api/fingerly/admin",
-            "/elsewhere/api/v1/identify",
+            "/k7x2qm4a/admin",
+            "/k7x2qm4a/api/v1/identify",
+            "/k7x2qm4ax",
+            "/other",
+            "/",
+            "",
         ],
     )
-    def test_refuses_every_route_that_is_not_proxyable(self, path: str) -> None:
+    def test_refuses_every_path_but_the_configured_one(self, path: str) -> None:
         for adapter, call in both(proxy(recorder := Recorder(json_response({})))):
             status, _, _ = call(adapter, path=path, headers={"x-api-key": PUBLIC_KEY})
+            assert status == 404
+        assert recorder.calls == 0
+
+    @pytest.mark.parametrize("path", ["/admin", PATH])
+    def test_refuses_what_lies_under_a_mount_at_the_path(self, path: str) -> None:
+        # Mounted at its own path, only the mount itself is the path. ASGI is
+        # given the whole path here, as Starlette 0.47 and newer report it.
+        recorder = Recorder(json_response({}))
+        mounted = proxy(recorder)
+        asgi_status, _, _ = call_asgi(
+            mounted.asgi,
+            path=PATH + path,
+            root_path=PATH,
+            headers={"x-api-key": PUBLIC_KEY},
+        )
+        wsgi_status, _, _ = call_wsgi(
+            mounted.wsgi, path=path, script_name=PATH, headers={"x-api-key": PUBLIC_KEY}
+        )
+        assert (asgi_status, wsgi_status) == (404, 404)
+        assert recorder.calls == 0
+
+    def test_refuses_an_unknown_path_before_the_method(self) -> None:
+        for adapter, call in both(proxy(recorder := Recorder(json_response({})))):
+            status, _, _ = call(adapter, path="/other", method="GET")
             assert status == 404
         assert recorder.calls == 0
 
@@ -364,12 +451,14 @@ class TestRefusals:
     def test_never_reads_events_through_the_proxy(self) -> None:
         """Event reads need a secret key and must be unreachable from a browser."""
         for adapter, call in both(proxy(recorder := Recorder(json_response({})))):
-            for path in [
-                "/api/fingerly/api/v1/events",
-                "/api/fingerly/api/v1/events/x",
+            for path, method in [
+                (PATH, "GET"),
+                (PATH + "/events", "GET"),
+                (PATH + "/events/x", "GET"),
+                (PATH + "/events", "POST"),
             ]:
                 status, _, _ = call(
-                    adapter, path=path, method="GET", headers={"x-api-key": PUBLIC_KEY}
+                    adapter, path=path, method=method, headers={"x-api-key": PUBLIC_KEY}
                 )
                 assert status in (404, 405)
         assert recorder.calls == 0
@@ -394,7 +483,8 @@ class TestClientIp:
         assert len(seen) == 2
         for request in seen:
             assert request.method == "POST"
-            assert request.path == IDENTIFY
+            assert request.path == PATH
+            assert request.mount == ""
             # Header lookup is case-insensitive under both standards.
             assert request.headers["cf-connecting-ip"] == "203.0.113.7"
             assert request.peer_host == "198.51.100.1"

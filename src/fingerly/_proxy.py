@@ -33,34 +33,26 @@ from ._config import (
     positive_seconds,
 )
 
-DEFAULT_PREFIX = "/api/fingerly"
 DEFAULT_MAX_BODY_BYTES = 1_048_576
 DEFAULT_TIMEOUT = 5.0
+
+#: What this proxy reports itself as upstream, shown per proxy in the
+#: dashboard. Keep it in step with ``__version__`` and ``pyproject.toml``.
+PROXY_VERSION = "python/0.1.0"
 
 #: Statuses that must not carry a body.
 BODILESS_STATUSES = frozenset({204, 205, 304})
 
-#: Upstream headers that describe that connection rather than our response.
-#: httpx has already decoded and framed the body, so replaying them would
-#: misdescribe the bytes we hand back.
-CONNECTION_HEADERS = frozenset(
-    {
-        "connection",
-        "content-encoding",
-        "content-length",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-    }
+#: The response headers relayed to the browser, and nothing else. A content
+#: blocker can match a response header by name, so an allowlist is what keeps
+#: anything naming Fingerly off the page, whatever the API adds in future.
+RELAYED_HEADERS = (
+    "content-type",
+    "x-request-id",
+    "ratelimit-limit",
+    "ratelimit-remaining",
+    "retry-after",
 )
-
-_IDENTIFY = "/identify"
-_SUPPLEMENT_PREFIX = "/events/"
-_SUPPLEMENT_SUFFIX = "/supplement"
 
 
 class Headers(Mapping[str, str]):
@@ -101,12 +93,16 @@ class ProxyRequest:
         peer_host: The socket peer's address, when the server reports one.
             This is your load balancer, not the visitor, whenever one is in
             front of you.
+        mount: What the server reported separately as the mount, ``root_path``
+            under ASGI and ``SCRIPT_NAME`` under WSGI, including any prefix a
+            sub-URI deployment adds.
     """
 
     method: str
     path: str
     headers: Headers
     peer_host: Optional[str] = None
+    mount: str = ""
 
 
 @dataclass(frozen=True)
@@ -137,12 +133,10 @@ class Screening(NamedTuple):
 
     Attributes:
         refusal: The response to send, when the request is refused.
-        upstream_path: The path to forward to, when it is not.
         api_key: The key to present upstream, when it is not.
     """
 
     refusal: Optional[ProxyResponse]
-    upstream_path: str = ""
     api_key: str = ""
 
 
@@ -151,24 +145,26 @@ class BodyTooLargeError(Exception):
 
 
 class FingerlyProxy:
-    """Same-origin proxy for the browser SDK's identify and supplement calls.
+    """Same-origin proxy for the browser SDK.
 
     Mount :attr:`asgi` under FastAPI, Starlette, Django 3+ or Quart, and
     :attr:`wsgi` under Flask, Django's sync stack or any other WSGI app. Both
     serve the same configuration, so one instance covers a project running
     both.
 
-    Only those two routes are forwarded, never event reads: reading events
-    needs a secret key and must stay unreachable from a browser. Customer
-    cookies and authorization headers are never passed on.
+    The browser SDK posts both of its calls to one path on your site, and
+    this forwards each to Fingerly's one ingest URL, never anywhere else and
+    never to event reads: reading events needs a secret key and must stay
+    unreachable from a browser. Customer cookies and authorization headers are
+    never passed on, and nothing that names Fingerly is relayed back.
 
     Example:
         >>> proxy = FingerlyProxy(
         ...     proxy_key=os.environ["FINGERLY_PROXY_KEY"],
-        ...     prefix="/metrics",
+        ...     path="/k7x2qm4a",
         ...     client_ip=lambda request: request.headers["cf-connecting-ip"],
         ... )
-        >>> app.mount("/metrics", proxy.asgi)
+        >>> app.add_route("/k7x2qm4a", proxy.asgi)
     """
 
     def __init__(
@@ -176,7 +172,7 @@ class FingerlyProxy:
         client_ip: Callable[[ProxyRequest], str],
         proxy_key: Optional[str] = None,
         secret_key: Optional[str] = None,
-        prefix: str = DEFAULT_PREFIX,
+        path: Optional[str] = None,
         api_version: str = "v1",
         upstream: Optional[str] = None,
         max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
@@ -193,10 +189,13 @@ class FingerlyProxy:
                 be synchronous.
             proxy_key: A proxy key, ``fly_px_…``, held only on your server.
             secret_key: Deprecated alternative to ``proxy_key``.
-            prefix: The path the proxy answers under, within the
-                application. It excludes anything a sub-URI deployment adds,
-                and is accepted as either present or already stripped.
-            api_version: Version accepted locally and forwarded upstream.
+            path: The path the dashboard issued for this proxy, such as
+                ``/k7x2qm4a``, within the application. When set, only that
+                path is answered, exactly, and anything else gets 404. It
+                excludes anything a sub-URI deployment adds, and is accepted
+                as either present or already stripped by the mount. Omit it
+                when the framework already routes only that path here.
+            api_version: Version of the upstream ingest URL.
             upstream: Overrides the API origin implied by the key.
             max_body_bytes: Larger request bodies are refused with 413.
             timeout: How long to wait for Fingerly, in seconds.
@@ -218,11 +217,11 @@ class FingerlyProxy:
         self._scope: KeyScope = parse_key(
             self._key, "px" if self._uses_proxy_key else "sk"
         )
-        self._upstream = normalize_endpoint(
-            upstream if upstream is not None else DEFAULT_ENDPOINT
+        self._upstream_url = (
+            normalize_endpoint(upstream if upstream is not None else DEFAULT_ENDPOINT)
+            + f"/api/{normalize_api_version(api_version)}/ingest"
         )
-        self._api_version = normalize_api_version(api_version)
-        self._prefix = _normalize_prefix(prefix)
+        self._path = None if path is None else _normalize_path(path)
         self._max_body_bytes = positive_int(max_body_bytes, "max_body_bytes")
         self._timeout = positive_seconds(timeout, "timeout")
         self._client_ip = client_ip
@@ -257,14 +256,13 @@ class FingerlyProxy:
             request: The incoming request, as the adapter read it.
 
         Returns:
-            Either a refusal, or the upstream path and the key to present.
+            Either a refusal, or the key to present upstream.
         """
+        if not self._answers(request):
+            return Screening(_refuse(404, "Not Found"))
+
         if request.method != "POST":
             return Screening(_refuse(405, "Method Not Allowed", (("allow", "POST"),)))
-
-        upstream_path = self._route_for(request.path)
-        if upstream_path is None:
-            return Screening(_refuse(404, "Not Found"))
 
         api_key = self._upstream_key_for(request.headers.get("x-api-key"))
         if api_key is None:
@@ -275,7 +273,7 @@ class FingerlyProxy:
         if declared.isdigit() and int(declared) > self._max_body_bytes:
             return Screening(_refuse(413, "Payload Too Large"))
 
-        return Screening(None, upstream_path, api_key)
+        return Screening(None, api_key)
 
     def too_large(self) -> ProxyResponse:
         """The response for a body that exceeded the limit while streaming."""
@@ -290,7 +288,7 @@ class FingerlyProxy:
             TypeError: If ``client_ip`` returns a value unusable as a header.
         """
         response = self._client().post(
-            self._upstream + screening.upstream_path,
+            self._upstream_url,
             headers=self.upstream_headers(request, screening.api_key),
             content=body,
         )
@@ -301,7 +299,7 @@ class FingerlyProxy:
     ) -> ProxyResponse:
         """Forwards a screened request on the running event loop."""
         response = await self._async_client().post(
-            self._upstream + screening.upstream_path,
+            self._upstream_url,
             headers=self.upstream_headers(request, screening.api_key),
             content=body,
         )
@@ -311,7 +309,8 @@ class FingerlyProxy:
         """Builds the upstream headers.
 
         Nothing is copied wholesale: only the body's content type, the visitor
-        metadata Fingerly needs, and an idempotency key when the SDK sent one.
+        metadata Fingerly needs, the version this proxy reports, and an
+        idempotency key when the SDK sent one.
 
         Raises:
             TypeError: If ``client_ip`` returns a value unusable as a header.
@@ -326,6 +325,7 @@ class FingerlyProxy:
             "x-fingerly-client-ip": client_ip,
             "x-fingerly-origin": request.headers.get("origin", ""),
             "x-fingerly-user-agent": request.headers.get("user-agent", ""),
+            "x-fingerly-proxy-version": PROXY_VERSION,
         }
         if self._uses_proxy_key:
             headers["x-fingerly-proxy-key"] = self._key
@@ -346,29 +346,23 @@ class FingerlyProxy:
             await self._async_http.aclose()
             self._async_http = None
 
-    def _route_for(self, path: str) -> Optional[str]:
-        """Maps a local path to its upstream path.
+    def _answers(self, request: ProxyRequest) -> bool:
+        """True when the request is for the one path this proxy serves.
 
-        The prefix is tolerated as either present or already stripped, so the
-        handler works whether the server reported the whole path or only what
-        followed the mount. Both adapters hand over the application-relative
-        path, and which of the two shapes that is depends on how the
-        application mounted this.
-
-        Returns:
-            The upstream path, or None when the route is not proxyable.
+        Without a configured path, whatever the framework routed here is
+        answered. With one, it is matched exactly, trailing slashes aside, and
+        accepted in either shape the adapters can hand over: present in the
+        application-relative path, when the proxy is routed from above it, or
+        already stripped into the mount, when the proxy is mounted at it. A
+        sub-URI deployment only adds to the front of the mount, so it changes
+        neither.
         """
-        versioned = f"/api/{self._api_version}"
-        mount = self._prefix + versioned
-        if path.startswith(mount + "/"):
-            resource = path[len(mount) :]
-        elif path.startswith(versioned + "/"):
-            resource = path[len(versioned) :]
-        else:
-            return None
-        if resource != _IDENTIFY and not _is_supplement(resource):
-            return None
-        return versioned + resource
+        if self._path is None:
+            return True
+        local = request.path.rstrip("/")
+        if request.mount.rstrip("/").endswith(self._path):
+            return local == ""
+        return local == self._path
 
     def _upstream_key_for(self, presented: Optional[str]) -> Optional[str]:
         """Decides which key to present upstream.
@@ -409,28 +403,20 @@ class FingerlyProxy:
         return self._async_http
 
 
-def _is_supplement(resource: str) -> bool:
-    """True for ``/events/{request_id}/supplement`` with one id segment."""
-    if not resource.startswith(_SUPPLEMENT_PREFIX):
-        return False
-    if not resource.endswith(_SUPPLEMENT_SUFFIX):
-        return False
-    request_id = resource[len(_SUPPLEMENT_PREFIX) : -len(_SUPPLEMENT_SUFFIX)]
-    return bool(request_id) and "/" not in request_id
+def _normalize_path(value: str) -> str:
+    """Validates the path the dashboard issued and drops trailing slashes.
 
-
-def _normalize_prefix(value: str) -> str:
-    """Validates the local mount path and drops trailing slashes.
+    It is matched exactly: the proxy answers that path and nothing under it.
 
     Raises:
-        TypeError: If the prefix is not an absolute URL path.
+        TypeError: If the path is not an absolute URL path.
     """
     if not isinstance(value, str):
-        raise TypeError("prefix must be an absolute URL path")
-    prefix = value.rstrip("/")
-    if not prefix.startswith("/") or "?" in prefix or "#" in prefix:
-        raise TypeError("prefix must be an absolute URL path")
-    return prefix
+        raise TypeError("path must be an absolute URL path such as /k7x2qm4a")
+    path = value.strip().rstrip("/")
+    if not path.startswith("/") or len(path) < 2 or "?" in path or "#" in path:
+        raise TypeError("path must be an absolute URL path such as /k7x2qm4a")
+    return path
 
 
 def _is_header_safe(value: str) -> bool:
@@ -453,16 +439,16 @@ def _refuse(
 
 
 def _relay(response: httpx.Response) -> ProxyResponse:
-    """Returns the upstream response to the browser.
+    """Returns the upstream response to the browser, allowlisted headers only.
 
-    Connection-scoped headers are dropped because httpx has already decoded
-    the body, and the result is marked uncacheable.
+    The length is recomputed because httpx has already decoded the body, and
+    the result is marked uncacheable.
     """
     body = b"" if response.status_code in BODILESS_STATUSES else response.content
     headers = [
-        (name, value)
-        for name, value in response.headers.multi_items()
-        if name.lower() not in CONNECTION_HEADERS and name.lower() != "cache-control"
+        (name, response.headers[name])
+        for name in RELAYED_HEADERS
+        if name in response.headers
     ]
     headers.append(("cache-control", "no-store"))
     if response.status_code not in BODILESS_STATUSES:

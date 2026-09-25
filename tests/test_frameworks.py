@@ -23,6 +23,8 @@ dispatcher = pytest.importorskip("werkzeug.middleware.dispatcher")
 
 PROXY_KEY = "fly_px_development_test"
 PUBLIC_KEY = "fly_pk_development_test"
+PATH = "/k7x2qm4a"
+INGEST = "https://api.fingerly.io/api/v1/ingest"
 BROWSER_HEADERS = {
     "x-api-key": PUBLIC_KEY,
     "origin": "https://shop.test",
@@ -39,16 +41,24 @@ class Upstream:
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        return httpx.Response(200, json={"request_id": "identified"})
+        return httpx.Response(
+            200,
+            json={"request_id": "identified"},
+            headers={
+                "x-request-id": "identified",
+                "fingerly-balance-micros": "100",
+                "set-cookie": "a=b",
+            },
+        )
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self)
 
 
 def build(upstream: Upstream, **options: Any) -> FingerlyProxy:
-    """A proxy mounted at /metrics whose upstream is the fake above."""
+    """A proxy answering the issued path whose upstream is the fake above."""
     options.setdefault("proxy_key", PROXY_KEY)
-    options.setdefault("prefix", "/metrics")
+    options.setdefault("path", PATH)
     return FingerlyProxy(
         client_ip=lambda request: request.headers.get("cf-connecting-ip", ""),
         transport=upstream.transport(),
@@ -57,36 +67,60 @@ def build(upstream: Upstream, **options: Any) -> FingerlyProxy:
     )
 
 
+def assert_relays_nothing_naming_fingerly(response: httpx.Response) -> None:
+    """A blocker can match a response header by name, so none may name Fingerly."""
+    assert response.headers["x-request-id"] == "identified"
+    assert "set-cookie" not in response.headers
+    for name, value in response.headers.items():
+        assert "fingerly" not in name.lower()
+        assert "fingerly" not in value.lower()
+
+
 class TestStarlette:
-    def starlette_client(self, proxy: FingerlyProxy) -> httpx.AsyncClient:
-        app = starlette_applications.Starlette(
-            routes=[starlette_routing.Mount("/metrics", app=proxy.asgi)]
-        )
-        return httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="https://shop.test"
-        )
+    def post(self, app: Any, paths: list[str], **kwargs: Any) -> list[httpx.Response]:
+        """Posts to each path in turn through a real Starlette app."""
 
-    def test_forwards_identify_from_a_mounted_app(self) -> None:
+        async def drive() -> list[httpx.Response]:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="https://shop.test"
+            ) as client:
+                kwargs.setdefault("headers", BROWSER_HEADERS)
+                kwargs.setdefault("content", b'{"signals":{}}')
+                return [await client.post(path, **kwargs) for path in paths]
+
+        return run(drive())
+
+    def test_forwards_from_a_route_at_the_issued_path(self) -> None:
+        # A route is matched exactly by Starlette itself, so no path is needed.
         upstream = Upstream()
-
-        async def drive() -> httpx.Response:
-            async with self.starlette_client(build(upstream)) as client:
-                return await client.post(
-                    "/metrics/api/v1/identify",
-                    headers=BROWSER_HEADERS,
-                    content=b'{"signals":{}}',
-                )
-
-        response = run(drive())
+        app = starlette_applications.Starlette(
+            routes=[
+                starlette_routing.Route(PATH, endpoint=build(upstream, path=None).asgi)
+            ]
+        )
+        (response,) = self.post(app, [PATH])
         assert response.status_code == 200
         assert response.json() == {"request_id": "identified"}
         assert response.headers["cache-control"] == "no-store"
+        assert_relays_nothing_naming_fingerly(response)
 
         forwarded = upstream.requests[0]
-        assert str(forwarded.url) == "https://api.fingerly.io/api/v1/identify"
+        assert str(forwarded.url) == INGEST
         assert forwarded.headers["x-fingerly-client-ip"] == "203.0.113.5"
         assert forwarded.headers["x-fingerly-proxy-key"] == PROXY_KEY
+        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.1.0"
         assert "cookie" not in forwarded.headers
+
+    def test_forwards_from_a_mount_at_the_issued_path(self) -> None:
+        # Starlette redirects the bare mount path to its slashed form, which is
+        # why the README routes instead; mounted, the path still matches.
+        upstream = Upstream()
+        app = starlette_applications.Starlette(
+            routes=[starlette_routing.Mount(PATH, app=build(upstream).asgi)]
+        )
+        responses = self.post(app, [PATH + "/", PATH + "/admin", PATH + "/events"])
+        assert [response.status_code for response in responses] == [200, 404, 404]
+        assert [str(request.url) for request in upstream.requests] == [INGEST]
 
     def test_forwards_from_a_deployment_under_a_sub_uri(self) -> None:
         # Nested mounts, which is what a sub-URI deployment looks like: the
@@ -94,62 +128,35 @@ class TestStarlette:
         # knows nothing about it.
         upstream = Upstream()
         inner = starlette_applications.Starlette(
-            routes=[starlette_routing.Mount("/metrics", app=build(upstream).asgi)]
+            routes=[starlette_routing.Route(PATH, endpoint=build(upstream).asgi)]
         )
         app = starlette_applications.Starlette(
             routes=[starlette_routing.Mount("/shop", app=inner)]
         )
-
-        async def drive() -> httpx.Response:
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=app), base_url="https://shop.test"
-            ) as client:
-                return await client.post(
-                    "/shop/metrics/api/v1/identify",
-                    headers=BROWSER_HEADERS,
-                    content=b'{"signals":{}}',
-                )
-
-        response = run(drive())
+        (response,) = self.post(app, ["/shop" + PATH])
         assert response.status_code == 200
-        assert str(upstream.requests[0].url) == (
-            "https://api.fingerly.io/api/v1/identify"
-        )
+        assert str(upstream.requests[0].url) == INGEST
 
-    def test_refuses_event_reads_and_unknown_routes(self) -> None:
+    def test_refuses_other_paths_under_a_root_mount(self) -> None:
+        # Mounted at the root, the configured path is all that stands between
+        # the proxy and every other URL on the site.
         upstream = Upstream()
-
-        async def drive() -> list[int]:
-            async with self.starlette_client(build(upstream)) as client:
-                return [
-                    (
-                        await client.post(
-                            f"/metrics{path}", headers=BROWSER_HEADERS, content=b"{}"
-                        )
-                    ).status_code
-                    for path in [
-                        "/api/v1/events",
-                        "/api/v1/events/request-1",
-                        "/api/v1/admin",
-                    ]
-                ]
-
-        assert run(drive()) == [404, 404, 404]
-        assert upstream.requests == []
+        app = starlette_applications.Starlette(
+            routes=[starlette_routing.Mount("/", app=build(upstream).asgi)]
+        )
+        responses = self.post(app, [PATH, "/other", PATH + "/admin"])
+        assert [response.status_code for response in responses] == [200, 404, 404]
+        assert [str(request.url) for request in upstream.requests] == [INGEST]
 
     def test_refuses_a_browser_key_from_another_deployment(self) -> None:
         upstream = Upstream()
-
-        async def drive() -> int:
-            async with self.starlette_client(build(upstream)) as client:
-                response = await client.post(
-                    "/metrics/api/v1/identify",
-                    headers={"x-api-key": "fly_pk_production_test"},
-                    content=b"{}",
-                )
-                return response.status_code
-
-        assert run(drive()) == 401
+        app = starlette_applications.Starlette(
+            routes=[starlette_routing.Route(PATH, endpoint=build(upstream).asgi)]
+        )
+        (response,) = self.post(
+            app, [PATH], headers={"x-api-key": "fly_pk_production_test"}, content=b"{}"
+        )
+        assert response.status_code == 401
         assert upstream.requests == []
 
 
@@ -161,33 +168,34 @@ class TestFlask:
         def home() -> str:
             return "the host app"
 
-        app.wsgi_app = dispatcher.DispatcherMiddleware(
-            app.wsgi_app, {"/metrics": proxy.wsgi}
-        )
+        app.wsgi_app = dispatcher.DispatcherMiddleware(app.wsgi_app, {PATH: proxy.wsgi})
         return httpx.Client(
             transport=httpx.WSGITransport(app=app.wsgi_app),
             base_url="https://shop.test",
         )
 
-    def test_forwards_identify_beside_the_host_app(self) -> None:
+    def test_forwards_beside_the_host_app(self) -> None:
         upstream = Upstream()
         with self.flask_client(build(upstream)) as client:
             identified = client.post(
-                "/metrics/api/v1/identify",
-                headers=BROWSER_HEADERS,
-                content=b'{"signals":{}}',
+                PATH, headers=BROWSER_HEADERS, content=b'{"signals":{}}'
+            )
+            reported = client.post(
+                PATH, headers=BROWSER_HEADERS, content=b'{"token":"deferred"}'
             )
             home = client.get("/")
 
-        assert identified.status_code == 200
+        assert (identified.status_code, reported.status_code) == (200, 200)
         assert identified.json() == {"request_id": "identified"}
         assert identified.headers["cache-control"] == "no-store"
+        assert_relays_nothing_naming_fingerly(identified)
         # Mounting the proxy must not disturb the application it sits beside.
         assert (home.status_code, home.text) == (200, "the host app")
 
+        assert [str(request.url) for request in upstream.requests] == [INGEST] * 2
         forwarded = upstream.requests[0]
-        assert str(forwarded.url) == "https://api.fingerly.io/api/v1/identify"
         assert forwarded.headers["x-fingerly-client-ip"] == "203.0.113.5"
+        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.1.0"
         assert "cookie" not in forwarded.headers
 
     def test_forwards_from_a_deployment_under_a_sub_uri(self) -> None:
@@ -197,7 +205,7 @@ class TestFlask:
         upstream = Upstream()
         app = flask.Flask(__name__)
         app.wsgi_app = dispatcher.DispatcherMiddleware(
-            app.wsgi_app, {"/metrics": build(upstream).wsgi}
+            app.wsgi_app, {PATH: build(upstream).wsgi}
         )
         deployed = dispatcher.DispatcherMiddleware(
             app.wsgi_app, {"/shop": app.wsgi_app}
@@ -207,39 +215,24 @@ class TestFlask:
             transport=httpx.WSGITransport(app=deployed), base_url="https://shop.test"
         ) as client:
             response = client.post(
-                "/shop/metrics/api/v1/identify",
-                headers=BROWSER_HEADERS,
-                content=b'{"signals":{}}',
+                "/shop" + PATH, headers=BROWSER_HEADERS, content=b'{"signals":{}}'
             )
 
         assert response.status_code == 200
-        assert str(upstream.requests[0].url) == (
-            "https://api.fingerly.io/api/v1/identify"
-        )
+        assert str(upstream.requests[0].url) == INGEST
 
-    def test_forwards_a_supplement_report(self) -> None:
-        upstream = Upstream()
-        with self.flask_client(build(upstream)) as client:
-            response = client.post(
-                "/metrics/api/v1/events/request-1/supplement",
-                headers=BROWSER_HEADERS,
-                content=b"{}",
-            )
-        assert response.status_code == 200
-        assert str(upstream.requests[0].url) == (
-            "https://api.fingerly.io/api/v1/events/request-1/supplement"
-        )
-
-    def test_refuses_event_reads_and_oversized_bodies(self) -> None:
+    def test_refuses_other_paths_and_oversized_bodies(self) -> None:
         upstream = Upstream()
         with self.flask_client(build(upstream, max_body_bytes=8)) as client:
-            read = client.post(
-                "/metrics/api/v1/events", headers=BROWSER_HEADERS, content=b"{}"
-            )
+            under = client.post(PATH + "/admin", headers=BROWSER_HEADERS, content=b"{}")
+            read = client.get(PATH, headers=BROWSER_HEADERS)
             oversized = client.post(
-                "/metrics/api/v1/identify",
-                headers=BROWSER_HEADERS,
-                content=b"a body well past the limit",
+                PATH, headers=BROWSER_HEADERS, content=b"a body well past the limit"
             )
-        assert (read.status_code, oversized.status_code) == (404, 413)
+        assert (under.status_code, read.status_code, oversized.status_code) == (
+            404,
+            405,
+            413,
+        )
+        assert read.headers["allow"] == "POST"
         assert upstream.requests == []

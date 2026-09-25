@@ -22,12 +22,12 @@ StartResponse = Callable[[str, list[tuple[str, str]]], Any]
 class WSGIProxy:
     """WSGI application serving the browser SDK's same-origin requests.
 
-    Reached as ``proxy.wsgi``. Mount it under Flask, Django's sync stack,
-    Pyramid or any other WSGI framework::
+    Reached as ``proxy.wsgi``. Mount it at the dashboard-issued path under
+    Flask, Django's sync stack, Pyramid or any other WSGI framework::
 
         from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
-        app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/metrics": proxy.wsgi})
+        app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/k7x2qm4a": proxy.wsgi})
     """
 
     def __init__(self, proxy: FingerlyProxy) -> None:
@@ -57,13 +57,15 @@ def _request_from(environ: Environ) -> ProxyRequest:
     mount in ``SCRIPT_NAME``, so ``PATH_INFO`` is already what the mounted
     application sees, and a deployment under a sub-URI puts its own prefix
     there too. Joining them would mean a Flask app served from ``/shop`` never
-    matched a proxy configured for ``/metrics``.
+    matched a proxy configured for ``/k7x2qm4a``. ``SCRIPT_NAME`` is still
+    passed on as the mount, for a proxy mounted at its own path.
     """
     return ProxyRequest(
         method=environ.get("REQUEST_METHOD", ""),
         path=environ.get("PATH_INFO", ""),
         headers=_headers_from(environ),
         peer_host=environ.get("REMOTE_ADDR"),
+        mount=environ.get("SCRIPT_NAME", ""),
     )
 
 

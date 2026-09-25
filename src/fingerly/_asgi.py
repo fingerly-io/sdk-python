@@ -23,10 +23,11 @@ Send = Callable[[MutableMapping[str, Any]], Awaitable[None]]
 class ASGIProxy:
     """ASGI application serving the browser SDK's same-origin requests.
 
-    Reached as ``proxy.asgi``. Mount it under FastAPI, Starlette, Django 3+,
-    Quart, Litestar or any other ASGI framework::
+    Reached as ``proxy.asgi``. Route the dashboard-issued path to it under
+    FastAPI, Starlette, Django 3+, Quart, Litestar or any other ASGI
+    framework::
 
-        app.mount("/metrics", proxy.asgi)
+        app.add_route("/k7x2qm4a", proxy.asgi)
     """
 
     def __init__(self, proxy: FingerlyProxy) -> None:
@@ -39,7 +40,7 @@ class ASGIProxy:
             await _acknowledge_lifespan(receive, send)
             return
         if kind != "http":
-            # A websocket cannot be an identify call; refuse without opening it.
+            # A websocket cannot be a browser SDK call; refuse without opening it.
             if kind == "websocket":
                 await send({"type": "websocket.close", "code": 1000})
             return
@@ -72,6 +73,7 @@ def _request_from(scope: Scope) -> ProxyRequest:
             for name, value in scope.get("headers", ())
         ),
         peer_host=client[0] if client else None,
+        mount=str(scope.get("root_path", "")),
     )
 
 
@@ -85,7 +87,7 @@ def _app_path(scope: Scope) -> str:
     with the application-relative path either way.
 
     Keeping the mount in would break a deployment under a sub-URI, where
-    ``root_path`` also carries a prefix that the configured ``prefix`` knows
+    ``root_path`` also carries a prefix that the configured ``path`` knows
     nothing about. This is the same rule Rack's ``PATH_INFO`` and ASP.NET
     Core's ``Request.Path`` already follow.
     """

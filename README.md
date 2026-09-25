@@ -105,53 +105,65 @@ own site and those requests become first-party. The proxy key is what lets that
 hop declare the visitor's real address, origin and user agent; a public key
 alone never can, so nobody can spoof them.
 
-One `FingerlyProxy` holds the configuration and exposes both server standards,
-so a project running each gets the same behaviour from one instance.
+Create a proxy in the dashboard (**Integration > Proxy keys**). It issues the
+proxy key and a random path, such as `/k7x2qm4a`, for you to serve it on. One
+`FingerlyProxy` holds the configuration and exposes both server standards, so a
+project running each gets the same behaviour from one instance.
 
 ```python
 from fingerly import FingerlyProxy
 
 proxy = FingerlyProxy(
     proxy_key=os.environ["FINGERLY_PROXY_KEY"],
-    prefix="/metrics",
+    path="/k7x2qm4a",
     client_ip=lambda request: request.headers["cf-connecting-ip"],
 )
 ```
 
-`prefix` is the path the proxy answers under, within your application, and it
-must match the mount: a proxy built with `prefix="/metrics"` mounted at
-`/fingerly` refuses everything with `404`. It excludes anything a sub-URI
-deployment adds, and a prefix the mount has already stripped works too, so the
-same configuration serves an app at the root and one served from `/shop`.
-Choose a neutral path. Blockers look for words such as `fingerprint`,
-`tracking` and `fingerly`.
+`path` is the path the dashboard issued, within your application. With it set,
+the proxy answers that one path, exactly, and anything else gets `404`,
+including anything under it. It excludes anything a sub-URI deployment adds,
+and a path the mount has already stripped works too, so the same configuration
+serves an app at the root and one served from `/shop`. It is optional: leave it
+out and the proxy answers whatever your framework routes to it, which is safe
+only where the framework routes that one path and nothing else. There is no
+default path. Use the one the dashboard issued rather than inventing one:
+blockers look for words such as `fingerprint`, `tracking` and `fingerly`.
 
 ### ASGI: FastAPI, Starlette, Django 3+, Quart, Litestar
 
 ```python
-app.mount("/metrics", proxy.asgi)
+app.add_route("/k7x2qm4a", proxy.asgi)
 ```
+
+A route rather than a mount: Starlette answers a mount's bare path with a
+redirect to its slashed form, and the browser SDK posts to the bare one.
 
 ### WSGI: Flask, Django's sync stack, Pyramid
 
 ```python
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
-app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/metrics": proxy.wsgi})
+app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/k7x2qm4a": proxy.wsgi})
 ```
+
+A mount answers everything under its path too, which is what `path` narrows
+back down to the one path.
 
 Then point the browser SDK at the same path:
 
 ```ts
-const fingerly = await load({ apiKey: 'fly_pk_…', endpoints: '/metrics' })
+const fingerly = await load({ apiKey: 'fly_pk_…', endpoints: '/k7x2qm4a' })
 ```
 
 ### What the proxy does
 
-It forwards only `POST` to `{prefix}/api/v1/identify` and
-`{prefix}/api/v1/events/{request_id}/supplement`. Anything else gets `404`, and
-any other method gets `405`. Event reads need a secret key and stay unreachable
-from a browser by construction.
+The browser SDK posts both of its calls, the identification and the report
+that follows it, to that one path. The proxy forwards each, as it is, to
+Fingerly's one ingest URL, `https://api.fingerly.io/api/v1/ingest`, and to
+nothing else. A path other than the configured one gets `404`, and any method
+but `POST` gets `405`. Event reads need a secret key and stay unreachable from
+a browser by construction.
 
 The browser must present a public key from the same environment as the proxy
 key, or the request gets `401`. Bodies over 1 MiB get `413`, enforced
@@ -159,24 +171,30 @@ while streaming rather than after buffering. Responses are marked `no-store`.
 
 Only the content type, the visitor metadata Fingerly needs, and an
 `idempotency-key` are forwarded. Customer cookies and authorization headers are
-never passed on. Upstream `content-encoding` and `content-length` are dropped
-from the relayed response, because httpx has already decoded the body and those
-headers would no longer describe it.
+never passed on. The proxy reports itself upstream as `python/0.1.0` in
+`x-fingerly-proxy-version`, which the dashboard shows per proxy.
+
+Back to the browser it relays only `content-type`, `x-request-id`,
+`ratelimit-limit`, `ratelimit-remaining` and `retry-after`, plus its own
+`cache-control: no-store` and a `content-length` for the decoded body. A
+content blocker can match a response header by name, so an allowlist is what
+keeps anything naming Fingerly off the page.
 
 > **`client_ip` is the one thing you must get right.** Resolve it from a header
 > your own infrastructure sets, such as your load balancer's or CDN's. Never
 > read the left-most `X-Forwarded-For` value: the visitor writes it. The
 > callback is synchronous, because it is called under both standards.
 
-`ProxyRequest` gives the callback `headers` (case-insensitive), `path`, `method`
-and `peer_host`. `peer_host` is the socket peer, which is your load balancer
+`ProxyRequest` gives the callback `headers` (case-insensitive), `path`, `method`,
+`peer_host` and `mount`. `peer_host` is the socket peer, which is your load balancer
 rather than the visitor whenever one sits in front of you.
 
 ### A note on mount paths
 
 Both adapters match the path as the mounted application sees it: `PATH_INFO`
 under WSGI, and under ASGI the `path` with `root_path` removed when it is still
-carrying it.
+carrying it. Mounted at its own path, the proxy finds that path in the mount
+instead, `SCRIPT_NAME` or `root_path`, with nothing after it.
 
 That last part needs care. ASGI servers disagree about what `path` holds under
 a mount: Starlette 0.47 and newer leave it whole and report the prefix
@@ -186,7 +204,7 @@ it was given rather than assuming.
 
 Taking the application-relative path rather than the whole one is what makes a
 sub-URI deployment work. There, `root_path` or `SCRIPT_NAME` carries a prefix
-that belongs to the deployment and that your `prefix` knows nothing about, so a
+that belongs to the deployment and that your `path` knows nothing about, so a
 proxy matching on the whole path would refuse every request. It is the same
 rule Rack's `PATH_INFO` and ASP.NET Core's `Request.Path` already follow.
 
@@ -243,4 +261,5 @@ exception hierarchy. `__init__.py` only exposes the public API.
 
 Pass `api_version` to select a route version, for example `v1` (the default) or
 `v2`. The server must support the chosen version. The version applies to every
-API request; it is separate from the endpoint origin.
+API request; it is separate from the endpoint origin. On the proxy it selects
+the ingest URL, `/api/v2/ingest`, and nothing on your own site.
