@@ -18,7 +18,8 @@ from ._config import (
     parse_key,
     positive_seconds,
 )
-from ._errors import FingerlyConnectionError, FingerlyTimeoutError
+from ._errors import FingerlyAPIError, FingerlyConnectionError, FingerlyTimeoutError
+from ._http import MAX_RESPONSE_BYTES, AsyncPool, BodyTooLargeError, Reply, SyncPool
 from ._models import Event, EventPage, parse_event, parse_page
 from ._transport import (
     KeyAuth,
@@ -50,7 +51,8 @@ class _BaseFingerly:
             secret_key: A server-only key, ``fly_sk_{environment}_…``. Its
                 prefix names the environment read.
             endpoint: Overrides the Fingerly API origin, for a local API.
-            timeout: Per-request timeout in seconds.
+            timeout: One deadline, in seconds, over the whole request:
+                connecting, sending, the response headers and the body.
             api_version: API route version; the server must support it.
 
         Raises:
@@ -70,21 +72,21 @@ class _BaseFingerly:
             f"secret_key={self._secret_key!r})"
         )
 
-    def _interpret(self, response: httpx.Response) -> Mapping[str, Any]:
+    def _interpret(self, response: Reply) -> Mapping[str, Any]:
         """Turns a response into a decoded body or the matching error.
 
         Raises:
             FingerlyAPIError: On any non-2xx response, redirects included:
                 requests never follow one, so a 3xx is not an answer.
         """
-        if not 200 <= response.status_code < 300:
+        if not 200 <= response.status < 300:
             raise api_error(
-                response.status_code,
-                response.content,
+                response.status,
+                response.body,
                 self._secret_key,
                 response.headers.get("retry-after"),
             )
-        return decode_json(response.content, response.status_code)
+        return decode_json(response.body, response.status)
 
 
 class Events:
@@ -183,28 +185,35 @@ class Fingerly(_BaseFingerly):
         timeout: float = DEFAULT_TIMEOUT,
         api_version: str = "v1",
         transport: Optional[httpx.BaseTransport] = None,
+        limits: Optional[httpx.Limits] = None,
     ) -> None:
         """See :class:`_BaseFingerly` for the shared arguments.
 
         Args:
             transport: Replacement httpx transport, for tests or a host with
-                its own HTTP stack.
+                its own HTTP stack. It is used as given, as one pool.
+            limits: Connections this client may hold across its pools. The
+                default lets 256 concurrent reads reuse connections.
         """
         super().__init__(secret_key, endpoint, timeout, api_version)
-        self._http = httpx.Client(
-            base_url=self._base_url,
-            headers=headers_for(),
-            auth=KeyAuth(self._secret_key),
-            timeout=self._timeout,
-            follow_redirects=False,
-            cookies=no_cookies(),
-            transport=transport,
-        )
+
+        def build(pool_transport: Optional[httpx.BaseTransport]) -> httpx.Client:
+            return httpx.Client(
+                base_url=self._base_url,
+                headers=headers_for(),
+                auth=KeyAuth(self._secret_key),
+                timeout=self._timeout,
+                follow_redirects=False,
+                cookies=no_cookies(),
+                transport=pool_transport,
+            )
+
+        self._pool = SyncPool(build, self._timeout, limits, transport)
         self.events = Events(self)
 
     def close(self) -> None:
-        """Closes the pooled connection. Safe to call more than once."""
-        self._http.close()
+        """Closes the pooled connections. Safe to call more than once."""
+        self._pool.close()
 
     def __enter__(self: _Self) -> _Self:
         return self
@@ -228,12 +237,14 @@ class Fingerly(_BaseFingerly):
             FingerlyAPIError: On any non-2xx response.
         """
         try:
-            response = self._http.get(path, params=params)
+            reply = self._pool.request("GET", path, params=params)
         except httpx.TimeoutException as error:
             raise FingerlyTimeoutError() from error
         except httpx.HTTPError as error:
             raise FingerlyConnectionError("Could not reach the Fingerly API") from error
-        return self._interpret(response)
+        except BodyTooLargeError as error:
+            raise _too_large(error) from None
+        return self._interpret(reply)
 
 
 class AsyncFingerly(_BaseFingerly):
@@ -254,28 +265,37 @@ class AsyncFingerly(_BaseFingerly):
         timeout: float = DEFAULT_TIMEOUT,
         api_version: str = "v1",
         transport: Optional[httpx.AsyncBaseTransport] = None,
+        limits: Optional[httpx.Limits] = None,
     ) -> None:
         """See :class:`_BaseFingerly` for the shared arguments.
 
         Args:
             transport: Replacement httpx transport, for tests or a host with
-                its own HTTP stack.
+                its own HTTP stack. It is used as given, as one pool.
+            limits: Connections this client may hold across its pools. The
+                default lets 256 concurrent reads reuse connections.
         """
         super().__init__(secret_key, endpoint, timeout, api_version)
-        self._http = httpx.AsyncClient(
-            base_url=self._base_url,
-            headers=headers_for(),
-            auth=KeyAuth(self._secret_key),
-            timeout=self._timeout,
-            follow_redirects=False,
-            cookies=no_cookies(),
-            transport=transport,
-        )
+
+        def build(
+            pool_transport: Optional[httpx.AsyncBaseTransport],
+        ) -> httpx.AsyncClient:
+            return httpx.AsyncClient(
+                base_url=self._base_url,
+                headers=headers_for(),
+                auth=KeyAuth(self._secret_key),
+                timeout=self._timeout,
+                follow_redirects=False,
+                cookies=no_cookies(),
+                transport=pool_transport,
+            )
+
+        self._pool = AsyncPool(build, self._timeout, limits, transport)
         self.events = AsyncEvents(self)
 
     async def aclose(self) -> None:
-        """Closes the pooled connection. Safe to call more than once."""
-        await self._http.aclose()
+        """Closes the pooled connections. Safe to call more than once."""
+        await self._pool.aclose()
 
     async def __aenter__(self: _Self) -> _Self:
         return self
@@ -299,9 +319,20 @@ class AsyncFingerly(_BaseFingerly):
             FingerlyAPIError: On any non-2xx response.
         """
         try:
-            response = await self._http.get(path, params=params)
+            reply = await self._pool.request("GET", path, params=params)
         except httpx.TimeoutException as error:
             raise FingerlyTimeoutError() from error
         except httpx.HTTPError as error:
             raise FingerlyConnectionError("Could not reach the Fingerly API") from error
-        return self._interpret(response)
+        except BodyTooLargeError as error:
+            raise _too_large(error) from None
+        return self._interpret(reply)
+
+
+def _too_large(error: BodyTooLargeError) -> FingerlyAPIError:
+    """The error for a response body over the cap; the body is never read."""
+    return FingerlyAPIError(
+        f"Fingerly API response is larger than {MAX_RESPONSE_BYTES // 1048576} MiB",
+        error.status,
+        code="response_too_large",
+    )

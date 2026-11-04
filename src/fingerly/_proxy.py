@@ -12,12 +12,15 @@ a response, so both standards refuse and forward identically.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
 import httpx
+
+from ._http import AsyncPool, Reply, SyncPool
 
 if TYPE_CHECKING:  # Imported for typing only; the adapters import this module.
     from ._asgi import ASGIProxy
@@ -181,6 +184,7 @@ class FingerlyProxy:
         timeout: float = DEFAULT_TIMEOUT,
         transport: Optional[httpx.BaseTransport] = None,
         async_transport: Optional[httpx.AsyncBaseTransport] = None,
+        limits: Optional[httpx.Limits] = None,
     ) -> None:
         """Validates every option before either handler exists.
 
@@ -200,9 +204,14 @@ class FingerlyProxy:
             api_version: Version of the upstream ingest URL.
             upstream: Overrides the API origin implied by the key.
             max_body_bytes: Larger request bodies are refused with 413.
-            timeout: How long to wait for Fingerly, in seconds.
-            transport: Replacement httpx transport for the WSGI handler.
+            timeout: One deadline, in seconds, over the whole upstream
+                exchange: connecting, sending, the response headers and the
+                body. A trickling upstream cannot extend it.
+            transport: Replacement httpx transport for the WSGI handler, used
+                as given, as one pool.
             async_transport: Replacement httpx transport for the ASGI handler.
+            limits: Upstream connections each handler may hold. The default
+                lets 256 concurrent requests per process reuse connections.
 
         Raises:
             TypeError: If a credential, route, limit or callback is invalid.
@@ -230,8 +239,10 @@ class FingerlyProxy:
         self._client_ip = client_ip
         self._transport = transport
         self._async_transport = async_transport
-        self._http: Optional[httpx.Client] = None
-        self._async_http: Optional[httpx.AsyncClient] = None
+        self._limits = limits
+        self._http: Optional[SyncPool] = None
+        self._async_http: Optional[AsyncPool] = None
+        self._lock = threading.Lock()
 
     def __repr__(self) -> str:
         kind = "proxy_key" if self._uses_proxy_key else "secret_key"
@@ -297,23 +308,25 @@ class FingerlyProxy:
         Raises:
             TypeError: If ``client_ip`` returns a value unusable as a header.
         """
-        response = self._client().post(
+        reply = self._sync_pool().request(
+            "POST",
             self._upstream_url,
             headers=self.upstream_headers(request, screening.api_key),
             content=body,
         )
-        return _relay(response)
+        return _relay(reply)
 
     async def aforward(
         self, screening: Screening, request: ProxyRequest, body: bytes
     ) -> ProxyResponse:
         """Forwards a screened request on the running event loop."""
-        response = await self._async_client().post(
+        reply = await self._asyncio_pool().request(
+            "POST",
             self._upstream_url,
             headers=self.upstream_headers(request, screening.api_key),
             content=body,
         )
-        return _relay(response)
+        return _relay(reply)
 
     def upstream_headers(self, request: ProxyRequest, api_key: str) -> dict[str, str]:
         """Builds the upstream headers.
@@ -345,16 +358,17 @@ class FingerlyProxy:
         return headers
 
     def close(self) -> None:
-        """Closes the WSGI handler's pooled connection."""
-        if self._http is not None:
-            self._http.close()
-            self._http = None
+        """Closes the WSGI handler's pooled connections."""
+        with self._lock:
+            pool, self._http = self._http, None
+        if pool is not None:
+            pool.close()
 
     async def aclose(self) -> None:
-        """Closes the ASGI handler's pooled connection."""
-        if self._async_http is not None:
-            await self._async_http.aclose()
-            self._async_http = None
+        """Closes the ASGI handler's pooled connections."""
+        pool, self._async_http = self._async_http, None
+        if pool is not None:
+            await pool.aclose()
 
     def _answers(self, request: ProxyRequest) -> bool:
         """True when the request is for the one path this proxy serves.
@@ -392,25 +406,42 @@ class FingerlyProxy:
             return None
         return presented if browser.environment == self._scope.environment else None
 
-    def _client(self) -> httpx.Client:
-        """Builds the synchronous upstream client on first use."""
-        if self._http is None:
-            self._http = httpx.Client(
-                timeout=self._timeout,
-                follow_redirects=False,
-                cookies=no_cookies(),
-                transport=self._transport,
-            )
-        return self._http
+    def _sync_pool(self) -> SyncPool:
+        """Builds the synchronous upstream pool on first use."""
+        with self._lock:
+            if self._http is None:
+                timeout = self._timeout
 
-    def _async_client(self) -> httpx.AsyncClient:
-        """Builds the asyncio upstream client on the loop that first uses it."""
+                def build(transport: Optional[httpx.BaseTransport]) -> httpx.Client:
+                    return httpx.Client(
+                        timeout=timeout,
+                        follow_redirects=False,
+                        cookies=no_cookies(),
+                        transport=transport,
+                    )
+
+                self._http = SyncPool(
+                    build, self._timeout, self._limits, self._transport
+                )
+            return self._http
+
+    def _asyncio_pool(self) -> AsyncPool:
+        """Builds the asyncio upstream pool on the loop that first uses it."""
         if self._async_http is None:
-            self._async_http = httpx.AsyncClient(
-                timeout=self._timeout,
-                follow_redirects=False,
-                cookies=no_cookies(),
-                transport=self._async_transport,
+            timeout = self._timeout
+
+            def build(
+                transport: Optional[httpx.AsyncBaseTransport],
+            ) -> httpx.AsyncClient:
+                return httpx.AsyncClient(
+                    timeout=timeout,
+                    follow_redirects=False,
+                    cookies=no_cookies(),
+                    transport=transport,
+                )
+
+            self._async_http = AsyncPool(
+                build, self._timeout, self._limits, self._async_transport
             )
         return self._async_http
 
@@ -450,19 +481,18 @@ def _refuse(
     return ProxyResponse(status, headers, body)
 
 
-def _relay(response: httpx.Response) -> ProxyResponse:
+def _relay(reply: Reply) -> ProxyResponse:
     """Returns the upstream response to the browser, allowlisted headers only.
 
-    The length is recomputed because httpx has already decoded the body, and
-    the result is marked uncacheable.
+    The body was read in full before this runs, so a truncated answer is a
+    failure rather than a success. The length is recomputed because httpx has
+    already decoded the body, and the result is marked uncacheable.
     """
-    body = b"" if response.status_code in BODILESS_STATUSES else response.content
+    body = b"" if reply.status in BODILESS_STATUSES else reply.body
     headers = [
-        (name, response.headers[name])
-        for name in RELAYED_HEADERS
-        if name in response.headers
+        (name, reply.headers[name]) for name in RELAYED_HEADERS if name in reply.headers
     ]
     headers.append(("cache-control", "no-store"))
-    if response.status_code not in BODILESS_STATUSES:
+    if reply.status not in BODILESS_STATUSES:
         headers.append(("content-length", str(len(body))))
-    return ProxyResponse(response.status_code, headers, body)
+    return ProxyResponse(reply.status, headers, body)

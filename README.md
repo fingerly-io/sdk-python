@@ -221,9 +221,20 @@ whichever you used: `proxy.close()` for WSGI, `await proxy.aclose()` for ASGI.
 
 ## Timeouts
 
-`timeout` is passed to `httpx` and applies per connect, read, write and pool
-operation, which is the Python convention. It is not a single deadline over the
-whole request.
+`timeout` is one deadline over the whole request: connecting, sending, the
+response headers and the body. An API that answers a byte at a time cannot
+stretch it. The default is 10 seconds for the clients and 5 for the proxy.
+Response bodies over 4 MiB are refused rather than buffered: the clients raise
+`FingerlyAPIError` with code `response_too_large`.
+
+## Connections
+
+Each client, and each proxy handler, keeps its connections open between
+requests and shares them across threads or tasks. Up to 256 concurrent requests
+per process reuse connections rather than opening one each; pass
+`limits=httpx.Limits(max_connections=…)` to change that. Connections are
+replaced every five minutes, so a changed DNS answer is picked up. Redirects
+are never followed and no cookies are kept.
 
 ## Development and release preparation
 
