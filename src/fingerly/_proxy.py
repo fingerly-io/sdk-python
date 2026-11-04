@@ -12,6 +12,7 @@ a response, so both standards refuse and forward identically.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import threading
 from collections.abc import Iterable, Mapping, Sequence
@@ -48,6 +49,9 @@ from ._config import (
 #: Where the proxy reports what it could not forward: one line per failure,
 #: never a stack trace. Attach a handler or raise the level as you like.
 logger = logging.getLogger("fingerly.proxy")
+
+#: The one-line answer, and log message, for a misconfigured ``client_ip``.
+NO_CLIENT_IP = "The client IP callback returned no valid address"
 
 DEFAULT_MAX_BODY_BYTES = 1_048_576
 DEFAULT_TIMEOUT = 5.0
@@ -150,10 +154,12 @@ class Screening(NamedTuple):
     Attributes:
         refusal: The response to send, when the request is refused.
         api_key: The key to present upstream, when it is not.
+        client_ip: The visitor address ``client_ip`` resolved, when it is not.
     """
 
     refusal: Optional[ProxyResponse]
     api_key: str = ""
+    client_ip: str = ""
 
 
 class BodyTooLargeError(Exception):
@@ -305,7 +311,11 @@ class FingerlyProxy:
         if declared.isdigit() and int(declared) > self._max_body_bytes:
             return Screening(_refuse(413, "Payload Too Large"))
 
-        return Screening(None, api_key)
+        client_ip = self._resolve_client_ip(request)
+        if client_ip is None:
+            return Screening(_refuse(500, NO_CLIENT_IP))
+
+        return Screening(None, api_key, client_ip)
 
     def too_large(self) -> ProxyResponse:
         """The response for a body that exceeded the limit while streaming."""
@@ -319,7 +329,7 @@ class FingerlyProxy:
         Raises:
             TypeError: If ``client_ip`` returns a value unusable as a header.
         """
-        headers = self.upstream_headers(request, screening.api_key)
+        headers = self.upstream_headers(request, screening.api_key, screening.client_ip)
         try:
             reply = self._sync_pool().request(
                 "POST", self._upstream_url, headers=headers, content=body
@@ -332,7 +342,7 @@ class FingerlyProxy:
         self, screening: Screening, request: ProxyRequest, body: bytes
     ) -> ProxyResponse:
         """Forwards a screened request on the running event loop."""
-        headers = self.upstream_headers(request, screening.api_key)
+        headers = self.upstream_headers(request, screening.api_key, screening.client_ip)
         try:
             reply = await self._asyncio_pool().request(
                 "POST", self._upstream_url, headers=headers, content=body
@@ -353,19 +363,28 @@ class FingerlyProxy:
         logger.warning("Proxy upstream failed: %s", _failure_reason(error))
         return _refuse(502, "Bad gateway")
 
-    def upstream_headers(self, request: ProxyRequest, api_key: str) -> dict[str, str]:
+    def upstream_headers(
+        self, request: ProxyRequest, api_key: str, client_ip: Optional[str] = None
+    ) -> dict[str, str]:
         """Builds the upstream headers.
 
         Nothing is copied wholesale: only the body's content type, the visitor
         metadata Fingerly needs, the version this proxy reports, and an
         idempotency key when the SDK sent one.
 
+        Args:
+            request: The incoming request.
+            api_key: The key to present upstream.
+            client_ip: The visitor's address, resolved by :meth:`screen`;
+                resolved here when omitted.
+
         Raises:
-            TypeError: If ``client_ip`` returns a value unusable as a header.
+            TypeError: If ``client_ip`` resolves to no valid IP address.
         """
-        client_ip = self._client_ip(request)
-        if not isinstance(client_ip, str) or not _is_header_safe(client_ip):
-            raise TypeError("client_ip must resolve to a plain address")
+        if client_ip is None:
+            client_ip = self._resolve_client_ip(request)
+            if client_ip is None:
+                raise TypeError(NO_CLIENT_IP)
 
         headers = {
             "content-type": request.headers.get("content-type", "application/json"),
@@ -394,6 +413,23 @@ class FingerlyProxy:
         pool, self._async_http = self._async_http, None
         if pool is not None:
             await pool.aclose()
+
+    def _resolve_client_ip(self, request: ProxyRequest) -> Optional[str]:
+        """Calls ``client_ip`` and accepts exactly one IPv4 or IPv6 literal.
+
+        Anything else, an exception included, is a configuration mistake
+        rather than a visitor's: it is reported once per process and the
+        request is not forwarded, since a wrong address would be scored as
+        the visitor's own.
+        """
+        try:
+            value = self._client_ip(request)
+        except Exception:
+            value = None
+        if isinstance(value, str) and _is_ip_literal(value):
+            return value
+        _report_bad_client_ip()
+        return None
 
     def _answers(self, request: ProxyRequest) -> bool:
         """True when the request is for the one path this proxy serves.
@@ -487,9 +523,27 @@ def _normalize_path(value: str) -> str:
     return path
 
 
-def _is_header_safe(value: str) -> bool:
-    """True when a value is printable ASCII, so it cannot inject a header."""
-    return all("\x20" <= character <= "\x7e" for character in value)
+def _is_ip_literal(value: str) -> bool:
+    """True for one IPv4 or IPv6 address, written plainly and nothing else."""
+    if not value or value != value.strip() or "%" in value:
+        return False
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
+_bad_client_ip_reported = threading.Event()
+
+
+def _report_bad_client_ip() -> None:
+    """Logs a misconfigured ``client_ip`` once per process, not per request."""
+    if not _bad_client_ip_reported.is_set():
+        _bad_client_ip_reported.set()
+        logger.error(
+            "%s; requests are answered with 500 until it is fixed", NO_CLIENT_IP
+        )
 
 
 def _refuse(

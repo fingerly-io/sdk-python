@@ -119,7 +119,7 @@ from fingerly import FingerlyProxy
 proxy = FingerlyProxy(
     proxy_key=os.environ["FINGERLY_PROXY_KEY"],
     path="/k7x2qm4a",
-    client_ip=lambda request: request.headers["cf-connecting-ip"],
+    client_ip=lambda request: request.headers.get("cf-connecting-ip") or request.peer_host,
 )
 ```
 
@@ -190,9 +190,19 @@ content blocker can match a response header by name, so an allowlist is what
 keeps anything naming Fingerly off the page.
 
 > **`client_ip` is the one thing you must get right.** Resolve it from a header
-> your own infrastructure sets, such as your load balancer's or CDN's. Never
-> read the left-most `X-Forwarded-For` value: the visitor writes it. The
-> callback is synchronous, because it is called under both standards.
+> your own infrastructure sets, such as your load balancer's or CDN's, and fall
+> back to `peer_host`, the socket peer. Trust that header only when traffic can
+> reach your app solely through that CDN or load balancer; otherwise a visitor
+> can send it themselves. Never read the left-most `X-Forwarded-For` value: the
+> visitor writes it. The callback is synchronous, because it is called under
+> both standards.
+
+The callback must return exactly one IPv4 or IPv6 address, such as
+`203.0.113.7` or `2001:db8::1`. Anything else, including `None`, an empty
+string, a list, an address with a port, or an exception, is treated as a
+configuration mistake: the request is not forwarded, the visitor gets `500`
+with the one line `The client IP callback returned no valid address`, and the
+`fingerly.proxy` logger reports it once per process.
 
 `ProxyRequest` gives the callback `headers` (case-insensitive), `path`, `method`,
 `peer_host` and `mount`. `peer_host` is the socket peer, which is your load balancer

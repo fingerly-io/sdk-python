@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import io
+import threading
 import time
 from collections.abc import AsyncIterator, Iterator, MutableMapping
 from typing import Any, Optional
@@ -18,6 +19,7 @@ import pytest
 from conftest import Recorder, json_response, run
 
 import fingerly
+import fingerly._proxy as proxy_module
 from fingerly import FingerlyProxy, ProxyRequest
 from fingerly._proxy import PROXY_VERSION
 
@@ -522,15 +524,74 @@ class TestClientIp:
             assert request.headers["cf-connecting-ip"] == "203.0.113.7"
             assert request.peer_host == "198.51.100.1"
 
-    @pytest.mark.parametrize("address", ["1.2.3.4\r\nx-evil: 1", "hé", 7, None])
-    def test_refuses_a_callback_result_that_could_inject_a_header(
-        self, address: Any
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "1.2.3.4\r\nx-evil: 1",
+            "hé",
+            7,
+            None,
+            "",
+            "null",
+            "unknown",
+            " 203.0.113.10",
+            "203.0.113.10, 198.51.100.2",
+            ["203.0.113.10"],
+            "999.1.1.1",
+            "[2001:db8::1]",
+            "fe80::1%eth0",
+            "203.0.113.10:443",
+        ],
+    )
+    def test_refuses_anything_but_one_ip_literal(
+        self, address: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setattr(proxy_module, "_bad_client_ip_reported", threading.Event())
         recorder = Recorder(json_response({}))
         injected = proxy(recorder, client_ip=lambda request: address)
         for adapter, call in both(injected):
-            with pytest.raises(TypeError):
-                call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            status, headers, body = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            assert status == 500
+            assert body == b"The client IP callback returned no valid address"
+            assert headers["content-type"] == "text/plain; charset=utf-8"
+        assert recorder.calls == 0
+
+    def test_treats_a_raising_callback_as_the_same_mistake_and_logs_once(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(proxy_module, "_bad_client_ip_reported", threading.Event())
+        caplog.set_level("ERROR", logger="fingerly.proxy")
+        recorder = Recorder(json_response({}))
+        # The README's first draft: a missing header raises KeyError.
+        strict = proxy(
+            recorder, client_ip=lambda request: request.headers["cf-connecting-ip"]
+        )
+        for adapter, call in both(strict):
+            for _ in range(3):
+                status, _, _ = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+                assert status == 500
+        assert recorder.calls == 0
+        assert len(caplog.records) == 1
+        assert "client IP callback" in caplog.records[0].getMessage()
+
+    @pytest.mark.parametrize("address", ["203.0.113.10", "2001:db8::1", "::1"])
+    def test_forwards_a_valid_address(self, address: str) -> None:
+        recorder = Recorder(json_response({}))
+        for adapter, call in both(proxy(recorder, client_ip=lambda request: address)):
+            status, _, _ = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            assert status == 200
+        assert [r.headers["x-fingerly-client-ip"] for r in recorder.requests] == [
+            address
+        ] * 2
+
+    def test_resolves_the_address_before_reading_the_body(self) -> None:
+        """A misconfigured callback never makes the proxy read or forward."""
+        recorder = Recorder(json_response({}))
+        status, _, _ = call_wsgi(
+            proxy(recorder, client_ip=lambda request: "").wsgi,
+            headers={"x-api-key": PUBLIC_KEY},
+        )
+        assert status == 500
         assert recorder.calls == 0
 
 
