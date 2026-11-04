@@ -344,6 +344,34 @@ class TestForwarding:
         assert (asgi_status, wsgi_status) == (200, 200)
         assert recorder.calls == 2
 
+    def test_never_reads_past_the_declared_wsgi_length(self) -> None:
+        """A raw socket, as `flask run` hands over, blocks on the byte after it.
+
+        PEP 3333 forbids reading past CONTENT_LENGTH. This stream raises where
+        a socket would hang until the client gave up.
+        """
+
+        class Socket(io.BytesIO):
+            def read(self, size: Optional[int] = -1) -> bytes:
+                left = len(self.getvalue()) - self.tell()
+                if size is None or size < 0 or size > left:
+                    raise AssertionError("read past CONTENT_LENGTH would block")
+                return super().read(size)
+
+        recorder = Recorder(json_response({}))
+        payload = b'{"signals":{}}'
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "PATH_INFO": PATH,
+            "CONTENT_LENGTH": str(len(payload)),
+            "HTTP_X_API_KEY": PUBLIC_KEY,
+            "wsgi.input": Socket(payload),
+        }
+        statuses: list[str] = []
+        proxy(recorder).wsgi(environ, lambda status, headers: statuses.append(status))
+        assert statuses == ["200 OK"]
+        assert recorder.requests[0].content == payload
+
     def test_reassembles_a_streamed_asgi_body(self) -> None:
         recorder = Recorder(json_response({}))
         payload = b'{"signals":"' + b"x" * 300 + b'"}'

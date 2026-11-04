@@ -89,8 +89,11 @@ def _headers_from(environ: Environ) -> Headers:
 def _read_body(environ: Environ, max_bytes: int) -> Optional[bytes]:
     """Reads the request body without buffering more than the limit.
 
-    One byte past the limit is enough to refuse, so at most ``max_bytes + 1``
-    is ever read, bounded further by the declared length when there is one.
+    With a declared length, exactly that many bytes are read and never one
+    more: PEP 3333 forbids reading past ``CONTENT_LENGTH``, and servers that
+    hand over the raw socket (Werkzeug's ``flask run``, wsgiref) block on the
+    extra byte until the client gives up. Without one, the server must have
+    terminated the stream, and one byte past the limit is enough to refuse.
 
     Returns:
         The bytes, or None when the limit was exceeded.
@@ -99,8 +102,12 @@ def _read_body(environ: Environ, max_bytes: int) -> Optional[bytes]:
     if stream is None:
         return b""
     declared = environ.get("CONTENT_LENGTH", "")
-    limit = min(int(declared), max_bytes) if declared.isdigit() else max_bytes
-    body: bytes = stream.read(limit + 1)
+    if declared.isdigit():
+        length = int(declared)
+        if length > max_bytes:
+            return None
+        return stream.read(length) if length else b""
+    body: bytes = stream.read(max_bytes + 1)
     return None if len(body) > max_bytes else body
 
 
