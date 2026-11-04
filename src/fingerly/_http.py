@@ -28,8 +28,8 @@ import contextvars
 import math
 import threading
 import time
-from collections.abc import Mapping
-from typing import Any, Callable, Generic, Optional, TypeVar
+from collections.abc import Mapping, Sequence
+from typing import Any, Callable, Generic, Optional, TypeVar, Union
 
 import httpx
 
@@ -48,6 +48,9 @@ RECYCLE_SECONDS = 300.0
 DEFAULT_LIMITS = httpx.Limits(
     max_connections=256, max_keepalive_connections=256, keepalive_expiry=5.0
 )
+
+#: Request headers as text, or as raw bytes the caller has already encoded.
+Headers = Union[Mapping[str, str], Sequence[tuple[bytes, bytes]]]
 
 _DEADLINE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
     "fingerly_deadline", default=None
@@ -274,7 +277,7 @@ class SyncPool:
         method: str,
         url: str,
         *,
-        headers: Optional[Mapping[str, str]] = None,
+        headers: Optional[Headers] = None,
         content: Optional[bytes] = None,
         params: Optional[Mapping[str, str]] = None,
     ) -> Reply:
@@ -354,7 +357,7 @@ class AsyncPool:
         method: str,
         url: str,
         *,
-        headers: Optional[Mapping[str, str]] = None,
+        headers: Optional[Headers] = None,
         content: Optional[bytes] = None,
         params: Optional[Mapping[str, str]] = None,
     ) -> Reply:
@@ -397,7 +400,7 @@ async def _read_async(
     client: httpx.AsyncClient,
     method: str,
     url: str,
-    headers: Optional[Mapping[str, str]],
+    headers: Optional[Headers],
     content: Optional[bytes],
     params: Optional[Mapping[str, str]],
 ) -> Reply:

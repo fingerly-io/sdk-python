@@ -793,3 +793,25 @@ class TestDisconnect:
         assert run(drive()) == []
         assert time.monotonic() - started < 2
         assert state["cancelled"] is True
+
+
+class TestVisitorHeaders:
+    def test_forwards_non_ascii_visitor_headers_byte_for_byte(self) -> None:
+        """A visitor controls these bytes; none of them may become a 500."""
+        recorder = Recorder(json_response({}))
+        app = proxy(recorder)
+        call_asgi(
+            app.asgi,
+            headers={"x-api-key": PUBLIC_KEY, "user-agent": "Mozilla é", "origin": "ü"},
+        )
+        environ_ua = "Mozilla \xe9"  # PEP 3333: Latin-1 decoded, as here
+        status, _, _ = call_wsgi(
+            app.wsgi, headers={"x-api-key": PUBLIC_KEY, "user-agent": environ_ua}
+        )
+        assert status == 200
+        assert recorder.calls == 2
+        sent = [dict(upstream.headers.raw) for upstream in recorder.requests]
+        # ASGI was sent the UTF-8 bytes of "é", WSGI the Latin-1 byte.
+        assert sent[0][b"x-fingerly-user-agent"] == "Mozilla é".encode()
+        assert sent[0][b"x-fingerly-origin"] == "ü".encode()
+        assert sent[1][b"x-fingerly-user-agent"] == b"Mozilla \xe9"

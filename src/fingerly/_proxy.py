@@ -332,7 +332,7 @@ class FingerlyProxy:
         headers = self.upstream_headers(request, screening.api_key, screening.client_ip)
         try:
             reply = self._sync_pool().request(
-                "POST", self._upstream_url, headers=headers, content=body
+                "POST", self._upstream_url, headers=_on_the_wire(headers), content=body
             )
         except (httpx.HTTPError, ResponseTooLargeError) as error:
             return self._upstream_failed(error)
@@ -345,7 +345,7 @@ class FingerlyProxy:
         headers = self.upstream_headers(request, screening.api_key, screening.client_ip)
         try:
             reply = await self._asyncio_pool().request(
-                "POST", self._upstream_url, headers=headers, content=body
+                "POST", self._upstream_url, headers=_on_the_wire(headers), content=body
             )
         except (httpx.HTTPError, ResponseTooLargeError) as error:
             return self._upstream_failed(error)
@@ -521,6 +521,24 @@ def _normalize_path(value: str) -> str:
     if not path.startswith("/") or len(path) < 2 or "?" in path or "#" in path:
         raise TypeError("path must be an absolute URL path such as /k7x2qm4a")
     return path
+
+
+def _on_the_wire(headers: Mapping[str, str]) -> list[tuple[bytes, bytes]]:
+    """Encodes header values as the bytes the visitor's browser sent.
+
+    Both standards hand over header values decoded as Latin-1, so encoding
+    them back is lossless. httpx would encode them as ASCII instead and
+    raise on a user agent or origin carrying any other byte, which a visitor
+    can send at will.
+    """
+    wire: list[tuple[bytes, bytes]] = []
+    for name, value in headers.items():
+        try:
+            encoded = value.encode("latin-1")
+        except UnicodeEncodeError:
+            encoded = value.encode("utf-8")
+        wire.append((name.encode("ascii"), encoded))
+    return wire
 
 
 def _is_ip_literal(value: str) -> bool:
