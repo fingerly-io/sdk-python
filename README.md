@@ -177,6 +177,12 @@ Only the content type, the visitor metadata Fingerly needs, and an
 never passed on. The proxy reports itself upstream as `python/0.1.0` in
 `x-fingerly-proxy-version`, which the dashboard shows per proxy.
 
+When Fingerly cannot be reached in time the proxy answers `504 Gateway
+timeout`, and on any other upstream failure, such as a refused connection, a
+malformed or truncated response or one over 4 MiB, `502 Bad gateway`. Both are
+short plain text marked `no-store`, and each writes one line, with no stack
+trace, to the `fingerly.proxy` logger.
+
 Back to the browser it relays only `content-type`, `x-request-id`,
 `ratelimit-limit`, `ratelimit-remaining` and `retry-after`, plus its own
 `cache-control: no-store` and a `content-length` for the decoded body. A

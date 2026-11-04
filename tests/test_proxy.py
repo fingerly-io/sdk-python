@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import gzip
 import io
-from collections.abc import MutableMapping
+from collections.abc import AsyncIterator, Iterator, MutableMapping
 from typing import Any, Optional
 
 import httpx
@@ -589,3 +589,87 @@ class TestNoSharedState:
                 call(adapter, headers={"x-api-key": PUBLIC_KEY})
         assert recorder.calls == 6
         assert all("cookie" not in request.headers for request in recorder.requests)
+
+
+class Chunks(httpx.SyncByteStream, httpx.AsyncByteStream):
+    """A response body for either client, optionally failing after its chunks."""
+
+    def __init__(
+        self, chunks: list[bytes], failure: Optional[Exception] = None
+    ) -> None:
+        self._chunks = chunks
+        self._failure = failure
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield from self._chunks
+        if self._failure is not None:
+            raise self._failure
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            yield chunk
+        if self._failure is not None:
+            raise self._failure
+
+
+class TestUpstreamFailures:
+    """Upstream trouble is a 502 or 504 with one log line, never a 500."""
+
+    @pytest.mark.parametrize(
+        ("failure", "status", "body", "reason"),
+        [
+            (httpx.ConnectError, 502, b"Bad gateway", "could not connect"),
+            (httpx.ReadError, 502, b"Bad gateway", "connection lost"),
+            (httpx.RemoteProtocolError, 502, b"Bad gateway", "malformed response"),
+            (httpx.ReadTimeout, 504, b"Gateway timeout", "timed out"),
+            (httpx.ConnectTimeout, 504, b"Gateway timeout", "timed out"),
+            (httpx.PoolTimeout, 504, b"Gateway timeout", "timed out"),
+        ],
+    )
+    def test_answers_a_transport_failure_without_raising(
+        self,
+        failure: type,
+        status: int,
+        body: bytes,
+        reason: str,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        def raising(request: httpx.Request) -> httpx.Response:
+            raise failure("detail that must not leak", request=request)
+
+        caplog.set_level("WARNING", logger="fingerly.proxy")
+        for adapter, call in both(proxy(Recorder.of(raising))):
+            got, headers, payload = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            assert (got, payload) == (status, body)
+            assert headers["cache-control"] == "no-store"
+            assert headers["content-type"] == "text/plain; charset=utf-8"
+            assert "fingerly" not in payload.lower().decode()
+        assert len(caplog.records) == 2
+        for record in caplog.records:
+            assert reason in record.getMessage()
+            assert "detail that must not leak" not in record.getMessage()
+            assert record.exc_info is None
+
+    def test_refuses_an_upstream_body_over_the_cap(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from fingerly._http import MAX_RESPONSE_BYTES
+
+        oversized = b"x" * (MAX_RESPONSE_BYTES + 1)
+        recorder = Recorder.of(
+            lambda request: httpx.Response(200, stream=Chunks([oversized]))
+        )
+        caplog.set_level("WARNING", logger="fingerly.proxy")
+        for adapter, call in both(proxy(recorder)):
+            status, _, payload = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            assert (status, payload) == (502, b"Bad gateway")
+        assert all("over 4 MiB" in r.getMessage() for r in caplog.records)
+
+    def test_never_relays_a_truncated_body_as_a_success(self) -> None:
+        def truncated(request: httpx.Request) -> httpx.Response:
+            failure = httpx.RemoteProtocolError("peer closed", request=request)
+            return httpx.Response(200, stream=Chunks([b'{"request_id":'], failure))
+
+        for adapter, call in both(proxy(Recorder.of(truncated))):
+            status, _, payload = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            assert (status, payload) == (502, b"Bad gateway")

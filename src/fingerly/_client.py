@@ -19,7 +19,7 @@ from ._config import (
     positive_seconds,
 )
 from ._errors import FingerlyAPIError, FingerlyConnectionError, FingerlyTimeoutError
-from ._http import MAX_RESPONSE_BYTES, AsyncPool, BodyTooLargeError, Reply, SyncPool
+from ._http import MAX_RESPONSE_BYTES, AsyncPool, Reply, ResponseTooLargeError, SyncPool
 from ._models import Event, EventPage, parse_event, parse_page
 from ._transport import (
     KeyAuth,
@@ -242,7 +242,7 @@ class Fingerly(_BaseFingerly):
             raise FingerlyTimeoutError() from error
         except httpx.HTTPError as error:
             raise FingerlyConnectionError("Could not reach the Fingerly API") from error
-        except BodyTooLargeError as error:
+        except ResponseTooLargeError as error:
             raise _too_large(error) from None
         return self._interpret(reply)
 
@@ -324,12 +324,12 @@ class AsyncFingerly(_BaseFingerly):
             raise FingerlyTimeoutError() from error
         except httpx.HTTPError as error:
             raise FingerlyConnectionError("Could not reach the Fingerly API") from error
-        except BodyTooLargeError as error:
+        except ResponseTooLargeError as error:
             raise _too_large(error) from None
         return self._interpret(reply)
 
 
-def _too_large(error: BodyTooLargeError) -> FingerlyAPIError:
+def _too_large(error: ResponseTooLargeError) -> FingerlyAPIError:
     """The error for a response body over the cap; the body is never read."""
     return FingerlyAPIError(
         f"Fingerly API response is larger than {MAX_RESPONSE_BYTES // 1048576} MiB",

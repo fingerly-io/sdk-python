@@ -58,7 +58,7 @@ _DEADLINE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
 _EXPIRED = 0.001
 
 
-class BodyTooLargeError(Exception):
+class ResponseTooLargeError(Exception):
     """Raised when a response body exceeds :data:`MAX_RESPONSE_BYTES`.
 
     Attributes:
@@ -283,7 +283,7 @@ class SyncPool:
         Raises:
             httpx.TimeoutException: When the deadline passes.
             httpx.HTTPError: On any other transport failure.
-            BodyTooLargeError: When the body exceeds the cap.
+            ResponseTooLargeError: When the body exceeds the cap.
             RuntimeError: When the pool has been closed.
         """
         with self._lock:
@@ -304,7 +304,7 @@ class SyncPool:
                 for chunk in response.iter_bytes():
                     size += len(chunk)
                     if size > MAX_RESPONSE_BYTES:
-                        raise BodyTooLargeError(response.status_code)
+                        raise ResponseTooLargeError(response.status_code)
                     chunks.append(chunk)
                     if time.monotonic() > deadline:
                         raise httpx.ReadTimeout("deadline exceeded")
@@ -363,7 +363,7 @@ class AsyncPool:
         Raises:
             httpx.TimeoutException: When the deadline passes.
             httpx.HTTPError: On any other transport failure.
-            BodyTooLargeError: When the body exceeds the cap.
+            ResponseTooLargeError: When the body exceeds the cap.
             RuntimeError: When the pool has been closed.
         """
         if self._shards.closed:
@@ -410,7 +410,7 @@ async def _read_async(
         async for chunk in response.aiter_bytes():
             size += len(chunk)
             if size > MAX_RESPONSE_BYTES:
-                raise BodyTooLargeError(response.status_code)
+                raise ResponseTooLargeError(response.status_code)
             chunks.append(chunk)
         return Reply(response.status_code, response.headers, b"".join(chunks))
 
@@ -423,4 +423,4 @@ def _refuse_declared_oversize(response: httpx.Response) -> None:
     """
     declared = response.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > MAX_RESPONSE_BYTES:
-        raise BodyTooLargeError(response.status_code)
+        raise ResponseTooLargeError(response.status_code)

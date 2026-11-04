@@ -12,6 +12,7 @@ a response, so both standards refuse and forward identically.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -20,7 +21,13 @@ from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
 import httpx
 
-from ._http import AsyncPool, Reply, SyncPool
+from ._http import (
+    MAX_RESPONSE_BYTES,
+    AsyncPool,
+    Reply,
+    ResponseTooLargeError,
+    SyncPool,
+)
 
 if TYPE_CHECKING:  # Imported for typing only; the adapters import this module.
     from ._asgi import ASGIProxy
@@ -37,6 +44,10 @@ from ._config import (
     positive_int,
     positive_seconds,
 )
+
+#: Where the proxy reports what it could not forward: one line per failure,
+#: never a stack trace. Attach a handler or raise the level as you like.
+logger = logging.getLogger("fingerly.proxy")
 
 DEFAULT_MAX_BODY_BYTES = 1_048_576
 DEFAULT_TIMEOUT = 5.0
@@ -308,25 +319,39 @@ class FingerlyProxy:
         Raises:
             TypeError: If ``client_ip`` returns a value unusable as a header.
         """
-        reply = self._sync_pool().request(
-            "POST",
-            self._upstream_url,
-            headers=self.upstream_headers(request, screening.api_key),
-            content=body,
-        )
+        headers = self.upstream_headers(request, screening.api_key)
+        try:
+            reply = self._sync_pool().request(
+                "POST", self._upstream_url, headers=headers, content=body
+            )
+        except (httpx.HTTPError, ResponseTooLargeError) as error:
+            return self._upstream_failed(error)
         return _relay(reply)
 
     async def aforward(
         self, screening: Screening, request: ProxyRequest, body: bytes
     ) -> ProxyResponse:
         """Forwards a screened request on the running event loop."""
-        reply = await self._asyncio_pool().request(
-            "POST",
-            self._upstream_url,
-            headers=self.upstream_headers(request, screening.api_key),
-            content=body,
-        )
+        headers = self.upstream_headers(request, screening.api_key)
+        try:
+            reply = await self._asyncio_pool().request(
+                "POST", self._upstream_url, headers=headers, content=body
+            )
+        except (httpx.HTTPError, ResponseTooLargeError) as error:
+            return self._upstream_failed(error)
         return _relay(reply)
+
+    def _upstream_failed(self, error: Exception) -> ProxyResponse:
+        """Answers an upstream failure without raising, in one log line.
+
+        A timeout is a 504 and anything else a 502, so no framework turns
+        it into a 500 with a stack trace. The body names nothing.
+        """
+        if isinstance(error, httpx.TimeoutException):
+            logger.warning("Proxy upstream timed out after %.1f s", self._timeout)
+            return _refuse(504, "Gateway timeout")
+        logger.warning("Proxy upstream failed: %s", _failure_reason(error))
+        return _refuse(502, "Bad gateway")
 
     def upstream_headers(self, request: ProxyRequest, api_key: str) -> dict[str, str]:
         """Builds the upstream headers.
@@ -479,6 +504,19 @@ def _refuse(
     ]
     headers.extend(extra)
     return ProxyResponse(status, headers, body)
+
+
+def _failure_reason(error: Exception) -> str:
+    """A short, stable reason for a failed upstream exchange."""
+    if isinstance(error, ResponseTooLargeError):
+        return f"response body over {MAX_RESPONSE_BYTES // 1048576} MiB"
+    if isinstance(error, httpx.ConnectError):
+        return "could not connect"
+    if isinstance(error, (httpx.RemoteProtocolError, httpx.DecodingError)):
+        return "malformed response"
+    if isinstance(error, (httpx.ReadError, httpx.WriteError)):
+        return "connection lost"
+    return "transport error"
 
 
 def _relay(reply: Reply) -> ProxyResponse:
