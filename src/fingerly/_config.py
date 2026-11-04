@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import re
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import NamedTuple
 from urllib.parse import urlsplit
 
@@ -158,3 +159,13 @@ def positive_int(value: int, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise TypeError(f"{name} must be a positive integer")
     return value
+
+
+def no_cookies() -> CookieJar:
+    """A cookie jar that stores nothing.
+
+    httpx keeps every ``Set-Cookie`` it receives and sends it on each later
+    request. One client serves every visitor, so a cookie set on one answer
+    would otherwise ride along on everybody's next request.
+    """
+    return CookieJar(policy=DefaultCookiePolicy(allowed_domains=[]))

@@ -352,3 +352,22 @@ class TestErrorStatus:
         now = datetime(2026, 11, 4, 12, 0, 0, tzinfo=timezone.utc)
         assert retry_after_seconds("Wed, 04 Nov 2026 12:00:30 GMT", now) == 30.0
         assert retry_after_seconds("Wed, 04 Nov 2026 11:00:00 GMT", now) == 0.0
+
+
+class TestNoCookies:
+    def test_never_sends_a_cookie_the_api_set(self) -> None:
+        response = json_response(event_body())
+        response.headers["set-cookie"] = "balancer=one; Path=/"
+        recorder = Recorder(response)
+        with client(recorder) as fingerly:
+            fingerly.events.get("one")
+            fingerly.events.get("two")
+
+        async def read() -> None:
+            async with async_client(recorder) as reader:
+                await reader.events.get("three")
+                await reader.events.get("four")
+
+        run(read())
+        assert recorder.calls == 4
+        assert all("cookie" not in request.headers for request in recorder.requests)

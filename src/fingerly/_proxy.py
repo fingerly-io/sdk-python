@@ -27,6 +27,7 @@ from ._config import (
     DEFAULT_ENDPOINT,
     KeyScope,
     Secret,
+    no_cookies,
     normalize_api_version,
     normalize_endpoint,
     parse_key,
@@ -397,6 +398,7 @@ class FingerlyProxy:
             self._http = httpx.Client(
                 timeout=self._timeout,
                 follow_redirects=False,
+                cookies=no_cookies(),
                 transport=self._transport,
             )
         return self._http
@@ -407,6 +409,7 @@ class FingerlyProxy:
             self._async_http = httpx.AsyncClient(
                 timeout=self._timeout,
                 follow_redirects=False,
+                cookies=no_cookies(),
                 transport=self._async_transport,
             )
         return self._async_http

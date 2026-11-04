@@ -12,6 +12,7 @@ import httpx
 from ._config import (
     DEFAULT_ENDPOINT,
     Secret,
+    no_cookies,
     normalize_api_version,
     normalize_endpoint,
     parse_key,
@@ -196,6 +197,7 @@ class Fingerly(_BaseFingerly):
             auth=KeyAuth(self._secret_key),
             timeout=self._timeout,
             follow_redirects=False,
+            cookies=no_cookies(),
             transport=transport,
         )
         self.events = Events(self)
@@ -266,6 +268,7 @@ class AsyncFingerly(_BaseFingerly):
             auth=KeyAuth(self._secret_key),
             timeout=self._timeout,
             follow_redirects=False,
+            cookies=no_cookies(),
             transport=transport,
         )
         self.events = AsyncEvents(self)

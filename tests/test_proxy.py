@@ -574,3 +574,18 @@ class TestLifecycle:
             "lifespan.startup.complete",
             "lifespan.shutdown.complete",
         ]
+
+
+class TestNoSharedState:
+    def test_never_replays_an_upstream_cookie_for_the_next_visitor(self) -> None:
+        upstream = httpx.Response(
+            200,
+            content=b"{}",
+            headers={"set-cookie": "balancer=visitor-one; Path=/"},
+        )
+        recorder = Recorder(upstream)
+        for adapter, call in both(proxy(recorder)):
+            for _ in range(3):
+                call(adapter, headers={"x-api-key": PUBLIC_KEY})
+        assert recorder.calls == 6
+        assert all("cookie" not in request.headers for request in recorder.requests)
