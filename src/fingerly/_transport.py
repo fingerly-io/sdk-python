@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Optional, Union
 from urllib.parse import quote
 
@@ -97,23 +98,62 @@ def rfc3339(value: Union[datetime, str], name: str) -> str:
     return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def decode_json(body: bytes) -> Mapping[str, Any]:
+def decode_json(body: bytes, status: int = 200) -> Mapping[str, Any]:
     """Decodes a successful response body.
+
+    Args:
+        body: The raw response body.
+        status: The response's HTTP status, carried into any error.
 
     Raises:
         FingerlyAPIError: If the body is not a JSON object, which means the
-            response did not come from the Fingerly API.
+            response did not come from the Fingerly API. The body itself is
+            never echoed.
     """
     try:
         payload = json.loads(body)
     except ValueError as error:
-        raise FingerlyAPIError("Fingerly API returned a non-JSON body", 200) from error
+        raise FingerlyAPIError(
+            "Fingerly API returned a non-JSON body", status
+        ) from error
     if not isinstance(payload, dict):
-        raise FingerlyAPIError("Fingerly API returned an unexpected body", 200)
+        raise FingerlyAPIError("Fingerly API returned an unexpected body", status)
     return payload
 
 
-def api_error(status: int, body: bytes, secret_key: str) -> FingerlyAPIError:
+def retry_after_seconds(
+    value: Optional[str], now: Optional[datetime] = None
+) -> Optional[float]:
+    """Parses ``Retry-After`` into seconds from now.
+
+    Both forms HTTP allows are read: a number of seconds and an HTTP date. A
+    date in the past is zero seconds.
+
+    Args:
+        value: The header, or None when the response had none.
+        now: Current time; override only in tests.
+
+    Returns:
+        The seconds to wait, or None when the header is absent or unreadable.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if text.isdigit():
+        return float(text)
+    try:
+        moment = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    current = now if now is not None else datetime.now(timezone.utc)
+    return max(0.0, (moment - current).total_seconds())
+
+
+def api_error(
+    status: int, body: bytes, secret_key: str, retry_after: Optional[str] = None
+) -> FingerlyAPIError:
     """Maps an error response to a redacted :class:`FingerlyAPIError`.
 
     The raw body is never surfaced: only the status, and the structured fields
@@ -123,6 +163,7 @@ def api_error(status: int, body: bytes, secret_key: str) -> FingerlyAPIError:
         status: The HTTP status code.
         body: The raw response body, which may be empty or not JSON at all.
         secret_key: The key to redact from anything carried into logs.
+        retry_after: The ``Retry-After`` header, when the response had one.
     """
     code: Optional[str] = None
     details: Any = None
@@ -147,6 +188,7 @@ def api_error(status: int, body: bytes, secret_key: str) -> FingerlyAPIError:
         code=code,
         details=details,
         request_id=request_id,
+        retry_after=retry_after_seconds(retry_after),
     )
 
 

@@ -306,3 +306,49 @@ class TestAsyncParity:
         fingerly = client(Recorder(json_response(event_body())))
         fingerly.close()
         fingerly.close()
+
+
+class TestErrorStatus:
+    @pytest.mark.parametrize("status", [301, 302, 304, 307, 308])
+    def test_raises_for_a_redirect_with_its_own_status(self, status: int) -> None:
+        recorder = Recorder(
+            httpx.Response(status, headers={"location": "https://elsewhere.test/"})
+        )
+        with client(recorder) as fingerly, pytest.raises(FingerlyAPIError) as caught:
+            fingerly.events.get("id")
+        assert caught.value.status == status
+        assert recorder.calls == 1
+
+    def test_reports_the_real_status_of_an_unreadable_success(self) -> None:
+        recorder = Recorder(httpx.Response(204))
+        with client(recorder) as fingerly, pytest.raises(FingerlyAPIError) as caught:
+            fingerly.events.get("id")
+        assert caught.value.status == 204
+
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [("7", 7.0), ("0", 0.0), (" 12 ", 12.0), ("soon", None), (None, None)],
+    )
+    def test_carries_retry_after_in_seconds(self, header: Any, expected: Any) -> None:
+        headers = {} if header is None else {"retry-after": header}
+        response = error_response("rate_limited", 429)
+        response.headers.update(headers)
+        for fingerly in (client(Recorder(response)),):
+            with fingerly, pytest.raises(FingerlyAPIError) as caught:
+                fingerly.events.get("id")
+            assert caught.value.retry_after == expected
+
+        async def read() -> None:
+            async with async_client(Recorder(response)) as reader:
+                await reader.events.get("id")
+
+        with pytest.raises(FingerlyAPIError) as caught_async:
+            run(read())
+        assert caught_async.value.retry_after == expected
+
+    def test_reads_an_http_date_retry_after(self) -> None:
+        from fingerly._transport import retry_after_seconds
+
+        now = datetime(2026, 11, 4, 12, 0, 0, tzinfo=timezone.utc)
+        assert retry_after_seconds("Wed, 04 Nov 2026 12:00:30 GMT", now) == 30.0
+        assert retry_after_seconds("Wed, 04 Nov 2026 11:00:00 GMT", now) == 0.0

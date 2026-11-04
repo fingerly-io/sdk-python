@@ -32,8 +32,11 @@ Public, proxy, management, malformed and unsupported keys are rejected before
 network access. Requests do not follow redirects. `get` and `list` each perform
 one request and never retry.
 
-`FingerlyAPIError` provides `status`, and optional `code`, `details` and
-`request_id`. The secret key is stripped from all three. `FingerlyTimeoutError`
+`FingerlyAPIError` provides `status`, and optional `code`, `details`,
+`request_id` and `retry_after`, the seconds a `429` or `503` asks you to wait
+(`None` when the response did not say). The secret key is stripped from all of
+them. Every status outside 2xx raises it, a redirect included, since requests
+never follow one. `FingerlyTimeoutError`
 and `FingerlyConnectionError` cover a deadline and an unreachable API; all three
 derive from `FingerlyError`.
 

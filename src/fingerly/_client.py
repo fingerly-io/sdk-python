@@ -65,11 +65,17 @@ class _BaseFingerly:
         """Turns a response into a decoded body or the matching error.
 
         Raises:
-            FingerlyAPIError: On any non-2xx response.
+            FingerlyAPIError: On any non-2xx response, redirects included:
+                requests never follow one, so a 3xx is not an answer.
         """
-        if response.status_code >= 400:
-            raise api_error(response.status_code, response.content, self._secret_key)
-        return decode_json(response.content)
+        if not 200 <= response.status_code < 300:
+            raise api_error(
+                response.status_code,
+                response.content,
+                self._secret_key,
+                response.headers.get("retry-after"),
+            )
+        return decode_json(response.content, response.status_code)
 
 
 class Events:

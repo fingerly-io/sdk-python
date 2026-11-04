@@ -44,6 +44,8 @@ class FingerlyAPIError(FingerlyError):
         details: Extra context from the error body; its shape depends on
             ``code``.
         request_id: Server-side trace id to quote in support requests.
+        retry_after: Seconds to wait before retrying, from ``Retry-After``
+            on a 429 or 503, or None when the response did not say.
     """
 
     def __init__(
@@ -54,12 +56,14 @@ class FingerlyAPIError(FingerlyError):
         code: Optional[str] = None,
         details: Any = None,
         request_id: Optional[str] = None,
+        retry_after: Optional[float] = None,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.details = details
         self.request_id = request_id
+        self.retry_after = retry_after
 
     def __repr__(self) -> str:
         return f"FingerlyAPIError(status={self.status}, code={self.code!r})"
