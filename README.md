@@ -117,7 +117,8 @@ event loop for `AsyncFingerly`.
 > the whole request, so every other request on that worker waits behind it:
 > five reads against a slow API stall a FastAPI worker for five timeouts in a
 > row. Use `AsyncFingerly` there, or a plain `def` route, which FastAPI and
-> Starlette run in a thread.
+> Starlette run in a thread. `Fingerly` raises a `RuntimeWarning`, once per
+> process, when it finds itself on a running event loop.
 
 | | `Fingerly` | `AsyncFingerly` |
 | --- | --- | --- |

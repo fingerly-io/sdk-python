@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
+import warnings
 from collections.abc import Mapping
 from datetime import datetime
 from types import TracebackType
@@ -236,6 +239,7 @@ class Fingerly(_BaseFingerly):
             FingerlyConnectionError: If the API could not be reached.
             FingerlyAPIError: On any non-2xx response.
         """
+        _warn_if_on_an_event_loop()
         try:
             reply = self._pool.request("GET", path, params=params)
         except httpx.TimeoutException as error:
@@ -327,6 +331,29 @@ class AsyncFingerly(_BaseFingerly):
         except ResponseTooLargeError as error:
             raise _too_large(error) from None
         return self._interpret(reply)
+
+
+_warned_about_event_loop = threading.Event()
+
+
+def _warn_if_on_an_event_loop() -> None:
+    """Warns, once per process, when the sync client blocks an event loop.
+
+    Called from ``async def`` code, every read stops the loop, and with it
+    every other request on that worker, until the API answers.
+    """
+    if _warned_about_event_loop.is_set():
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _warned_about_event_loop.set()
+    warnings.warn(
+        "Fingerly is blocking a running event loop; use AsyncFingerly in async code",
+        RuntimeWarning,
+        stacklevel=4,
+    )
 
 
 def _too_large(error: ResponseTooLargeError) -> FingerlyAPIError:

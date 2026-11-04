@@ -371,3 +371,31 @@ class TestNoCookies:
         run(read())
         assert recorder.calls == 4
         assert all("cookie" not in request.headers for request in recorder.requests)
+
+
+class TestSyncClientOnAnEventLoop:
+    def test_warns_once_when_it_blocks_a_running_loop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import threading
+
+        import fingerly._client as client_module
+
+        monkeypatch.setattr(
+            client_module, "_warned_about_event_loop", threading.Event()
+        )
+        recorder = Recorder(json_response(event_body()))
+
+        async def misuse() -> None:
+            with client(recorder) as fingerly:
+                with pytest.warns(RuntimeWarning, match="AsyncFingerly"):
+                    fingerly.events.get("one")
+                # Once per process, not per call.
+                fingerly.events.get("two")
+
+        run(misuse())
+        assert recorder.calls == 2
+
+    def test_stays_quiet_outside_an_event_loop(self) -> None:
+        with client(Recorder(json_response(event_body()))) as fingerly:
+            fingerly.events.get("one")  # filterwarnings = error would fail here
