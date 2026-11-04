@@ -6,9 +6,6 @@ Django and Flask, and `AsyncFingerly` for asyncio code such as FastAPI and
 Starlette. Python 3.9 or newer. One runtime dependency, `httpx`. The proxy
 serves both ASGI and WSGI, so it mounts under either.
 
-Version 0.1.0 is prepared for release;
-the repository is private and the PyPI package has not been published.
-
 ```python
 import os
 from fingerly import Fingerly
@@ -179,8 +176,9 @@ while streaming rather than after buffering. Responses are marked `no-store`.
 
 Only the content type, the visitor metadata Fingerly needs, and an
 `idempotency-key` are forwarded. Customer cookies and authorization headers are
-never passed on. The proxy reports itself upstream as `python/0.1.0` in
-`x-fingerly-proxy-version`, which the dashboard shows per proxy.
+never passed on. The proxy reports itself upstream as `python/<version>` in
+`x-fingerly-proxy-version`, which the dashboard shows per proxy, and sends
+`fingerly-python/<version>` as its user agent.
 
 When Fingerly cannot be reached in time the proxy answers `504 Gateway
 timeout`, and on any other upstream failure, such as a refused connection, a

@@ -17,9 +17,10 @@ import httpx
 
 from ._config import REDACTED, Secret, positive_int
 from ._errors import FingerlyAPIError
+from ._version import __version__
 
 #: Sent on every request so events record which SDK build made them.
-USER_AGENT = "fingerly-python/0.1.0"
+USER_AGENT = f"fingerly-python/{__version__}"
 
 
 def headers_for() -> dict[str, str]:

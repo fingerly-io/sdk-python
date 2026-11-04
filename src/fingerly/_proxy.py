@@ -29,6 +29,8 @@ from ._http import (
     ResponseTooLargeError,
     SyncPool,
 )
+from ._transport import USER_AGENT
+from ._version import __version__
 
 if TYPE_CHECKING:  # Imported for typing only; the adapters import this module.
     from ._asgi import ASGIProxy
@@ -57,8 +59,8 @@ DEFAULT_MAX_BODY_BYTES = 1_048_576
 DEFAULT_TIMEOUT = 5.0
 
 #: What this proxy reports itself as upstream, shown per proxy in the
-#: dashboard. Keep it in step with ``__version__`` and ``pyproject.toml``.
-PROXY_VERSION = "python/0.1.0"
+#: dashboard.
+PROXY_VERSION = f"python/{__version__}"
 
 #: Statuses that must not carry a body.
 BODILESS_STATUSES = frozenset({204, 205, 304})
@@ -482,6 +484,7 @@ class FingerlyProxy:
 
                 def build(transport: Optional[httpx.BaseTransport]) -> httpx.Client:
                     return httpx.Client(
+                        headers={"user-agent": USER_AGENT},
                         timeout=timeout,
                         follow_redirects=False,
                         cookies=no_cookies(),
@@ -502,6 +505,7 @@ class FingerlyProxy:
                 transport: Optional[httpx.AsyncBaseTransport],
             ) -> httpx.AsyncClient:
                 return httpx.AsyncClient(
+                    headers={"user-agent": USER_AGENT},
                     timeout=timeout,
                     follow_redirects=False,
                     cookies=no_cookies(),

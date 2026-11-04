@@ -21,9 +21,8 @@ from ._errors import (
 )
 from ._models import Event, EventPage, EventTrigger
 from ._proxy import FingerlyProxy, ProxyRequest
+from ._version import __version__
 from ._webhooks import verify_webhook
-
-__version__ = "0.1.0"
 
 __all__ = [
     "AsyncEvents",
