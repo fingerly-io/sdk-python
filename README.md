@@ -41,7 +41,8 @@ network access. Requests do not follow redirects. `get` and `list` each perform
 one request and never retry.
 
 `FingerlyAPIError` provides `status`, and optional `code`, `details`,
-`request_id` and `retry_after`, the seconds a `429` or `503` asks you to wait
+`request_id` and `retry_after`, the seconds a `429`, a `503` or a
+`404 event_pending` asks you to wait
 (`None` when the response did not say). The secret key is stripped from all of
 them. Every status outside 2xx raises it, a redirect included, since requests
 never follow one. `FingerlyTimeoutError` and `FingerlyConnectionError` cover a
@@ -55,14 +56,18 @@ needs no SDK upgrade.
 
 ## Read an event you just identified
 
-An event is readable as soon as identification answers, so this needs nothing
-special: send the `requestId` the browser SDK returned to your server and read
-it there with `fingerly.events.get(request_id)`, or
-`await fingerly.events.get(request_id)` with `AsyncFingerly`.
+Send the `requestId` the browser SDK returned to your server and read it there
+with `fingerly.events.get(request_id)`, or
+`await fingerly.events.get(request_id)` with `AsyncFingerly`. A `404` carries
+one of two codes:
 
-Earlier versions had a `wait_for` that polled through the gap between
-identification and the event becoming queryable. There is no gap, so a
-`404 event_not_found` now means a request id that was never issued.
+- `event_pending` raises `FingerlyEventPendingError`, a `FingerlyAPIError`: the
+  request id was accepted but its event is not recorded yet. It is not a
+  verdict. Try again after `retry_after` seconds, or verify asynchronously, for
+  example from a webhook. The SDK never retries on its own.
+- `event_not_found` raises a plain `FingerlyAPIError`: the request id was never
+  issued for this key's environment, or the event is past the 30-day
+  retention.
 
 The archived `document` arrives moments after the event itself, so check
 `has_document` rather than assuming it is there.
@@ -74,6 +79,10 @@ that it is recent, that its environment is correct, and that it was scored.
 Apply your own policy to the server's verdict. Do not authorize an action using
 scores or visitor identifiers supplied by the browser. Tags correlate events;
 they do not replace your application's authentication or replay protection.
+A `FingerlyEventPendingError` means the server has not decided yet: retry after
+`retry_after` seconds or verify asynchronously, and do not refuse the action as
+fraud on that answer alone. The framework guides below answer it with `503` and
+`Retry-After`.
 
 ## Webhooks
 
@@ -271,7 +280,12 @@ import os
 
 from fastapi import FastAPI, HTTPException, Request
 
-from fingerly import AsyncFingerly, FingerlyAPIError, FingerlyProxy
+from fingerly import (
+    AsyncFingerly,
+    FingerlyAPIError,
+    FingerlyEventPendingError,
+    FingerlyProxy,
+)
 
 proxy = FingerlyProxy(
     proxy_key=os.environ["FINGERLY_PROXY_KEY"],
@@ -299,6 +313,10 @@ app.add_route("/k7x2qm4a", proxy.asgi)
 async def verify(request_id: str, request: Request):
     try:
         event = await request.app.state.fingerly.events.get(request_id)
+    except FingerlyEventPendingError as error:
+        # Not decided yet, not fraud: ask the caller to come back.
+        retry_after = str(round(error.retry_after or 2))
+        raise HTTPException(503, headers={"Retry-After": retry_after}) from None
     except FingerlyAPIError as error:
         raise HTTPException(404 if error.status == 404 else 502) from None
     return {"visitor_id": event.visitor_id, "suspect_score": event.suspect_score}
@@ -375,13 +393,19 @@ async def application(scope, receive, send):
 # mysite/views.py
 from django.http import JsonResponse
 
-from fingerly import FingerlyAPIError
+from fingerly import FingerlyAPIError, FingerlyEventPendingError
 from mysite.identification import fingerly
 
 
 def verify(request, request_id):
     try:
         event = fingerly.events.get(request_id)
+    except FingerlyEventPendingError as error:
+        # Not decided yet, not fraud: ask the caller to come back.
+        retry_after = str(round(error.retry_after or 2))
+        return JsonResponse(
+            {"error": error.code}, status=503, headers={"Retry-After": retry_after}
+        )
     except FingerlyAPIError as error:
         status = 404 if error.status == 404 else 502
         return JsonResponse({"error": error.code}, status=status)
@@ -411,7 +435,12 @@ import os
 from flask import Flask, abort
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
-from fingerly import Fingerly, FingerlyAPIError, FingerlyProxy
+from fingerly import (
+    Fingerly,
+    FingerlyAPIError,
+    FingerlyEventPendingError,
+    FingerlyProxy,
+)
 
 app = Flask(__name__)
 fingerly = Fingerly(secret_key=os.environ["FINGERLY_SECRET_KEY"])
@@ -429,6 +458,10 @@ app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/k7x2qm4a": proxy.wsgi})
 def verify(request_id):
     try:
         event = fingerly.events.get(request_id)
+    except FingerlyEventPendingError as error:
+        # Not decided yet, not fraud: ask the caller to come back.
+        retry_after = str(round(error.retry_after or 2))
+        return {"error": error.code}, 503, {"Retry-After": retry_after}
     except FingerlyAPIError as error:
         abort(404 if error.status == 404 else 502)
     return {"visitor_id": event.visitor_id, "suspect_score": event.suspect_score}

@@ -16,7 +16,7 @@ from urllib.parse import quote
 import httpx
 
 from ._config import REDACTED, Secret, positive_int
-from ._errors import FingerlyAPIError
+from ._errors import FingerlyAPIError, FingerlyEventPendingError
 from ._version import __version__
 
 #: Sent on every request so events record which SDK build made them.
@@ -198,7 +198,12 @@ def api_error(
         # A non-JSON body still reports its HTTP status, and its contents are
         # deliberately dropped rather than surfaced.
         pass
-    return FingerlyAPIError(
+    error_class = (
+        FingerlyEventPendingError
+        if status == 404 and code == "event_pending"
+        else FingerlyAPIError
+    )
+    return error_class(
         f"Fingerly API returned HTTP {status}",
         status,
         code=code,

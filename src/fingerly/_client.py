@@ -105,9 +105,12 @@ class Events:
             request_id: The ``request_id`` returned by identification.
 
         Raises:
-            FingerlyAPIError: ``404 event_not_found`` when there is no such
-                event. One is readable as soon as identification answers, so
-                this means a request id that was never issued.
+            FingerlyEventPendingError: ``404 event_pending`` when the
+                request id was accepted but the event is not recorded yet;
+                ``retry_after`` says when to try again. Not retried here.
+            FingerlyAPIError: ``404 event_not_found`` when the request id was
+                never issued or the event is past retention, and any other
+                non-2xx answer.
             FingerlyTimeoutError: If the request exceeds the client timeout.
         """
         return parse_event(self._client._request(event_path(request_id)))

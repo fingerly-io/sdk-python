@@ -45,7 +45,8 @@ class FingerlyAPIError(FingerlyError):
             ``code``.
         request_id: Server-side trace id to quote in support requests.
         retry_after: Seconds to wait before retrying, from ``Retry-After``
-            on a 429 or 503, or None when the response did not say.
+            on a 429, a 503 or a ``404 event_pending``, or None when the
+            response did not say.
     """
 
     def __init__(
@@ -66,4 +67,16 @@ class FingerlyAPIError(FingerlyError):
         self.retry_after = retry_after
 
     def __repr__(self) -> str:
-        return f"FingerlyAPIError(status={self.status}, code={self.code!r})"
+        return f"{type(self).__name__}(status={self.status}, code={self.code!r})"
+
+
+class FingerlyEventPendingError(FingerlyAPIError):
+    """Raised for ``404 event_pending`` from an event read.
+
+    The request id was accepted but its event is not recorded yet. This is not
+    a verdict: try again after ``retry_after`` seconds, or verify
+    asynchronously. It is still a :class:`FingerlyAPIError`, so code that
+    catches that keeps working; ``event_not_found`` (never issued, or past
+    retention) does not raise this class. Reads are never retried
+    automatically.
+    """

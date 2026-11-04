@@ -17,6 +17,7 @@ from ._errors import (
     FingerlyAPIError,
     FingerlyConnectionError,
     FingerlyError,
+    FingerlyEventPendingError,
     FingerlyTimeoutError,
 )
 from ._models import Event, EventPage, EventTrigger
@@ -35,6 +36,7 @@ __all__ = [
     "FingerlyAPIError",
     "FingerlyConnectionError",
     "FingerlyError",
+    "FingerlyEventPendingError",
     "FingerlyProxy",
     "FingerlyTimeoutError",
     "ProxyRequest",

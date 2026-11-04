@@ -23,6 +23,7 @@ from fingerly import (
     Fingerly,
     FingerlyAPIError,
     FingerlyConnectionError,
+    FingerlyEventPendingError,
     FingerlyTimeoutError,
 )
 
@@ -245,8 +246,8 @@ class TestErrors:
 
 
 class TestMissingEvent:
-    """An event is readable as soon as identification answers, so a missing
-    one means a request id that was never issued: reported at once, in one
+    """A 404 is either a pending event (accepted, not recorded yet) or a missing
+    one (never issued, or past retention). Both are reported at once, in one
     request, rather than waited through."""
 
     def test_reports_a_missing_event_without_retrying(self) -> None:
@@ -255,7 +256,42 @@ class TestMissingEvent:
             fingerly.events.get("id")
         assert caught.value.status == 404
         assert caught.value.code == "event_not_found"
+        assert not isinstance(caught.value, FingerlyEventPendingError)
+        assert caught.value.retry_after is None
         assert recorder.calls == 1
+
+    def test_reports_a_pending_event_apart_without_retrying(self) -> None:
+        def pending() -> httpx.Response:
+            response = error_response("event_pending", 404)
+            response.headers["retry-after"] = "2"
+            return response
+
+        recorder = Recorder(pending())
+        with (
+            client(recorder) as fingerly,
+            pytest.raises(FingerlyEventPendingError) as caught,
+        ):
+            fingerly.events.get("id")
+        assert isinstance(caught.value, FingerlyAPIError)
+        assert (caught.value.status, caught.value.code) == (404, "event_pending")
+        assert caught.value.retry_after == 2.0
+        assert caught.value.request_id == "trace"
+        assert repr(caught.value).startswith("FingerlyEventPendingError(")
+        assert recorder.calls == 1
+
+        async def read() -> None:
+            async with async_client(Recorder(pending())) as reader:
+                await reader.events.get("id")
+
+        with pytest.raises(FingerlyEventPendingError) as caught_async:
+            run(read())
+        assert caught_async.value.retry_after == 2.0
+
+    def test_only_a_404_is_pending(self) -> None:
+        recorder = Recorder(error_response("event_pending", 409))
+        with client(recorder) as fingerly, pytest.raises(FingerlyAPIError) as caught:
+            fingerly.events.get("id")
+        assert not isinstance(caught.value, FingerlyEventPendingError)
 
     @pytest.mark.parametrize("status", [400, 401, 403, 429, 500, 404])
     def test_propagates_every_other_failure(self, status: int) -> None:

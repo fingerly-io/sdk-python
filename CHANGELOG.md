@@ -10,6 +10,11 @@ Not yet published. The first release.
   failures raise `FingerlyTimeoutError` or `FingerlyConnectionError`. Reads
   never retry. `Fingerly` warns once per process when it runs on an event
   loop, where `AsyncFingerly` belongs.
+- `404 event_pending` on `events.get` (the request id was accepted, the event
+  is not recorded yet; `Retry-After` is set) raises
+  `FingerlyEventPendingError`, a `FingerlyAPIError` subclass carrying
+  `retry_after`. `event_not_found` still means never issued or past retention
+  and raises a plain `FingerlyAPIError`. Neither is retried.
 - `verify_webhook` checks a delivery's signature and age against the raw
   body, accepts any of the first 32 signatures sent during a rotation, and
   never raises for malformed input.
