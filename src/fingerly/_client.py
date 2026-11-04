@@ -11,6 +11,7 @@ import httpx
 
 from ._config import (
     DEFAULT_ENDPOINT,
+    Secret,
     normalize_api_version,
     normalize_endpoint,
     parse_key,
@@ -19,6 +20,7 @@ from ._config import (
 from ._errors import FingerlyConnectionError, FingerlyTimeoutError
 from ._models import Event, EventPage, parse_event, parse_page
 from ._transport import (
+    KeyAuth,
     api_error,
     decode_json,
     event_path,
@@ -57,9 +59,15 @@ class _BaseFingerly:
         # or management key can never reach an API that would accept it.
         parse_key(secret_key, "sk")
         origin = DEFAULT_ENDPOINT if endpoint is None else normalize_endpoint(endpoint)
-        self._secret_key = secret_key
+        self._secret_key = Secret(secret_key)
         self._base_url = f"{origin}/api/{normalize_api_version(api_version)}"
         self._timeout = positive_seconds(timeout, "timeout")
+
+    def __repr__(self) -> str:
+        return (
+            f"{type(self).__name__}(endpoint={self._base_url!r}, "
+            f"secret_key={self._secret_key!r})"
+        )
 
     def _interpret(self, response: httpx.Response) -> Mapping[str, Any]:
         """Turns a response into a decoded body or the matching error.
@@ -184,7 +192,8 @@ class Fingerly(_BaseFingerly):
         super().__init__(secret_key, endpoint, timeout, api_version)
         self._http = httpx.Client(
             base_url=self._base_url,
-            headers=headers_for(secret_key),
+            headers=headers_for(),
+            auth=KeyAuth(self._secret_key),
             timeout=self._timeout,
             follow_redirects=False,
             transport=transport,
@@ -253,7 +262,8 @@ class AsyncFingerly(_BaseFingerly):
         super().__init__(secret_key, endpoint, timeout, api_version)
         self._http = httpx.AsyncClient(
             base_url=self._base_url,
-            headers=headers_for(secret_key),
+            headers=headers_for(),
+            auth=KeyAuth(self._secret_key),
             timeout=self._timeout,
             follow_redirects=False,
             transport=transport,

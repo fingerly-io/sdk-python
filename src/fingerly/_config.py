@@ -23,6 +23,35 @@ _KEY_LABEL: dict[str, str] = {"pk": "public", "sk": "secret", "px": "proxy"}
 _API_VERSION = re.compile(r"\Av[1-9][0-9]*\Z")
 
 
+REDACTED = "[redacted]"
+
+
+class Secret:
+    """A credential that never prints.
+
+    Held instead of the raw string, so ``repr``, ``vars``, debuggers, error
+    trackers that dump object state and accidental logging all show
+    ``[redacted]``. Pickling is refused rather than writing the key out.
+    """
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def reveal(self) -> str:
+        """The credential itself, for the one header that carries it."""
+        return self._value
+
+    def __repr__(self) -> str:
+        return REDACTED
+
+    __str__ = __repr__
+
+    def __reduce__(self) -> str:
+        raise TypeError("A Fingerly credential cannot be pickled")
+
+
 class KeyScope(NamedTuple):
     """The environment a Fingerly key is scoped to.
 

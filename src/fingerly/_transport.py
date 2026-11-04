@@ -7,32 +7,44 @@ share one definition of what a request looks like and what a failure means.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Optional, Union
 from urllib.parse import quote
 
-from ._config import positive_int
+import httpx
+
+from ._config import REDACTED, Secret, positive_int
 from ._errors import FingerlyAPIError
 
 #: Sent on every request so events record which SDK build made them.
 USER_AGENT = "fingerly-python/0.1.0"
 
-_REDACTED = "[redacted]"
 
+def headers_for() -> dict[str, str]:
+    """Builds the headers every request carries, the credential aside.
 
-def headers_for(secret_key: str) -> dict[str, str]:
-    """Builds the headers every authenticated request carries.
-
-    Args:
-        secret_key: The server-only read key.
+    The key is added per request by :class:`KeyAuth`, so the client's own
+    default headers, which debuggers and error trackers show, never hold it.
     """
-    return {
-        "x-api-key": secret_key,
-        "accept": "application/json",
-        "user-agent": USER_AGENT,
-    }
+    return {"accept": "application/json", "user-agent": USER_AGENT}
+
+
+class KeyAuth(httpx.Auth):
+    """Adds the secret key to each request as it is sent."""
+
+    def __init__(self, secret_key: Secret) -> None:
+        self._key = secret_key
+
+    def auth_flow(
+        self, request: httpx.Request
+    ) -> Generator[httpx.Request, httpx.Response, None]:
+        request.headers["x-api-key"] = self._key.reveal()
+        yield request
+
+    def __repr__(self) -> str:
+        return f"KeyAuth({REDACTED})"
 
 
 def event_path(request_id: str) -> str:
@@ -152,7 +164,10 @@ def retry_after_seconds(
 
 
 def api_error(
-    status: int, body: bytes, secret_key: str, retry_after: Optional[str] = None
+    status: int,
+    body: bytes,
+    secret_key: Union[Secret, str],
+    retry_after: Optional[str] = None,
 ) -> FingerlyAPIError:
     """Maps an error response to a redacted :class:`FingerlyAPIError`.
 
@@ -192,6 +207,7 @@ def api_error(
     )
 
 
-def _redact(value: str, secret_key: str) -> str:
+def _redact(value: str, secret_key: Union[Secret, str]) -> str:
     """Strips the secret key from anything an error may carry to logs."""
-    return value.replace(secret_key, _REDACTED) if secret_key else value
+    key = secret_key.reveal() if isinstance(secret_key, Secret) else secret_key
+    return value.replace(key, REDACTED) if key else value

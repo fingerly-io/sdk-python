@@ -26,6 +26,7 @@ if TYPE_CHECKING:  # Imported for typing only; the adapters import this module.
 from ._config import (
     DEFAULT_ENDPOINT,
     KeyScope,
+    Secret,
     normalize_api_version,
     normalize_endpoint,
     parse_key,
@@ -213,10 +214,11 @@ class FingerlyProxy:
             raise TypeError("client_ip is required")
 
         self._uses_proxy_key = bool(proxy_key)
-        self._key: str = proxy_key or secret_key or ""
+        raw_key: str = proxy_key or secret_key or ""
         self._scope: KeyScope = parse_key(
-            self._key, "px" if self._uses_proxy_key else "sk"
+            raw_key, "px" if self._uses_proxy_key else "sk"
         )
+        self._key = Secret(raw_key)
         self._upstream_url = (
             normalize_endpoint(upstream if upstream is not None else DEFAULT_ENDPOINT)
             + f"/api/{normalize_api_version(api_version)}/ingest"
@@ -229,6 +231,13 @@ class FingerlyProxy:
         self._async_transport = async_transport
         self._http: Optional[httpx.Client] = None
         self._async_http: Optional[httpx.AsyncClient] = None
+
+    def __repr__(self) -> str:
+        kind = "proxy_key" if self._uses_proxy_key else "secret_key"
+        return (
+            f"FingerlyProxy(path={self._path!r}, upstream={self._upstream_url!r}, "
+            f"{kind}={self._key!r})"
+        )
 
     @property
     def asgi(self) -> ASGIProxy:
@@ -328,7 +337,7 @@ class FingerlyProxy:
             "x-fingerly-proxy-version": PROXY_VERSION,
         }
         if self._uses_proxy_key:
-            headers["x-fingerly-proxy-key"] = self._key
+            headers["x-fingerly-proxy-key"] = self._key.reveal()
         idempotency_key = request.headers.get("idempotency-key")
         if idempotency_key:
             headers["idempotency-key"] = idempotency_key
@@ -375,7 +384,7 @@ class FingerlyProxy:
             The key to forward, or None when the caller is unauthorised.
         """
         if not self._uses_proxy_key:
-            return self._key
+            return self._key.reveal()
         try:
             browser = parse_key(presented or "", "pk")
         except TypeError:
