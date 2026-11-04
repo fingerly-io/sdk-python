@@ -7,6 +7,7 @@ types, so the two standards cannot drift apart.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, MutableMapping
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -59,7 +60,52 @@ class ASGIProxy:
         if body is None:
             return  # The client went away; there is nobody to answer.
 
-        await _send(send, await self._proxy.aforward(screening, request, body))
+        response = await _forward_unless_gone(
+            self._proxy.aforward(screening, request, body), receive
+        )
+        if response is not None:
+            await _send(send, response)
+
+
+async def _forward_unless_gone(
+    forwarding: Awaitable[ProxyResponse], receive: Receive
+) -> Optional[ProxyResponse]:
+    """Forwards, but gives up the moment the visitor disconnects.
+
+    Without this, a visitor who left would still hold an upstream connection
+    until the API answered, so connections opened and dropped in a loop would
+    pile up upstream work nobody reads.
+
+    Returns:
+        The response, or None when the visitor went away first.
+    """
+    forward = asyncio.ensure_future(forwarding)
+    gone = asyncio.ensure_future(_disconnected(receive))
+    try:
+        await asyncio.wait({forward, gone}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        if not forward.done() and not gone.done():
+            # Cancelled from outside: take both down with us.
+            forward.cancel()
+        gone.cancel()
+        await asyncio.gather(gone, return_exceptions=True)
+    if forward.done():
+        return forward.result()
+    forward.cancel()
+    await asyncio.gather(forward, return_exceptions=True)
+    return None
+
+
+async def _disconnected(receive: Receive) -> None:
+    """Returns when the server reports the client gone.
+
+    Once the body has been read, ``receive`` blocks until the client
+    disconnects. A server that answers it with anything else is not reporting
+    a disconnect, so this then waits until cancelled.
+    """
+    message = await receive()
+    if message.get("type") != "http.disconnect":
+        await asyncio.Event().wait()
 
 
 def _request_from(scope: Scope) -> ProxyRequest:

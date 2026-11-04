@@ -6,8 +6,10 @@ cannot drift apart.
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import io
+import time
 from collections.abc import AsyncIterator, Iterator, MutableMapping
 from typing import Any, Optional
 
@@ -105,6 +107,9 @@ def call_asgi(
         sent: list[dict[str, Any]] = []
 
         async def receive() -> MutableMapping[str, Any]:
+            if not messages:
+                # As a server does once the body is read: wait for a disconnect.
+                await asyncio.Event().wait()
             return messages.pop(0)
 
         async def send(message: MutableMapping[str, Any]) -> None:
@@ -673,3 +678,57 @@ class TestUpstreamFailures:
         for adapter, call in both(proxy(Recorder.of(truncated))):
             status, _, payload = call(adapter, headers={"x-api-key": PUBLIC_KEY})
             assert (status, payload) == (502, b"Bad gateway")
+
+
+class TestDisconnect:
+    def test_cancels_the_upstream_call_when_the_visitor_leaves(self) -> None:
+        state: dict[str, Any] = {"cancelled": False}
+
+        async def hanging(request: httpx.Request) -> httpx.Response:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                state["cancelled"] = True
+                raise
+            return json_response({})
+
+        app = FingerlyProxy(
+            proxy_key=PROXY_KEY,
+            path=PATH,
+            client_ip=lambda request: "203.0.113.10",
+            async_transport=httpx.MockTransport(hanging),
+        ).asgi
+
+        async def drive() -> list[Any]:
+            messages: list[dict[str, Any]] = [
+                {"type": "http.request", "body": b"{}", "more_body": False}
+            ]
+            sent: list[Any] = []
+
+            async def receive() -> MutableMapping[str, Any]:
+                if messages:
+                    return messages.pop(0)
+                await asyncio.sleep(0.1)
+                return {"type": "http.disconnect"}
+
+            async def send(message: MutableMapping[str, Any]) -> None:
+                sent.append(message)
+
+            scope = {
+                "type": "http",
+                "method": "POST",
+                "path": PATH,
+                "root_path": "",
+                "headers": [(b"x-api-key", PUBLIC_KEY.encode())],
+            }
+            await asyncio.wait_for(app(scope, receive, send), 5)
+            # Nothing left running once the visitor is gone.
+            await asyncio.sleep(0)
+            others = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            assert others == []
+            return sent
+
+        started = time.monotonic()
+        assert run(drive()) == []
+        assert time.monotonic() - started < 2
+        assert state["cancelled"] is True
