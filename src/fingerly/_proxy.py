@@ -557,10 +557,15 @@ def _raw_matches(raw_path: str, path: str) -> bool:
 
     Servers decode the path before an application sees it, so ``%2F``,
     ``%2e%2e`` or an encoded letter would otherwise reach the same route. The
-    configured path is plain, so the raw one must end with it verbatim, and no
-    segment may be a dot segment.
+    configured path is plain, so the raw one must end with it verbatim, with
+    no empty segment (``//``), which some servers collapse, and no dot
+    segment.
     """
-    if not raw_path.endswith(path):
+    if not raw_path.startswith("/") and "://" in raw_path:
+        # An absolute-form target, as some servers report REQUEST_URI.
+        _, _, rest = raw_path.partition("://")
+        raw_path = "/" + rest.partition("/")[2]
+    if not raw_path.endswith(path) or "//" in raw_path:
         return False
     return all(segment not in (".", "..") for segment in raw_path.split("/"))
 

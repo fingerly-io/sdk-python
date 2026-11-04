@@ -425,13 +425,15 @@ class TestRefusals:
             "/x/.." + PATH,
             "/." + PATH,
             "/" + PATH,
+            "/shop/" + PATH,
         ],
     )
     def test_matches_the_path_exactly_as_sent(self, raw: str) -> None:
         """What a server decodes or normalises must not reach the route."""
         recorder = Recorder(json_response({}))
         app = proxy(recorder)
-        decoded = PATH if "%" in raw or ".." in raw or "/." in raw else raw
+        # What the application is handed: decoded, and possibly normalised.
+        decoded = PATH if "%" in raw or "." in raw or "//" in raw else raw
         asgi_status, _, _ = call_asgi(
             app.asgi, path=decoded, raw_path=raw, headers={"x-api-key": PUBLIC_KEY}
         )
@@ -445,11 +447,12 @@ class TestRefusals:
         recorder = Recorder(json_response({}))
         app = proxy(recorder)
         call_asgi(app.asgi, raw_path=PATH, headers={"x-api-key": PUBLIC_KEY})
-        status, _, _ = call_wsgi(
-            app.wsgi, raw_uri=PATH + "?v=1", headers={"x-api-key": PUBLIC_KEY}
-        )
-        assert status == 200
-        assert recorder.calls == 2
+        for raw in [PATH + "?v=1", "https://shop.test" + PATH + "?v=1"]:
+            status, _, _ = call_wsgi(
+                app.wsgi, raw_uri=raw, headers={"x-api-key": PUBLIC_KEY}
+            )
+            assert status == 200
+        assert recorder.calls == 3
 
     def test_refuses_a_trailing_slash_under_a_mount(self) -> None:
         recorder = Recorder(json_response({}))
