@@ -119,13 +119,16 @@ from fingerly import FingerlyProxy
 proxy = FingerlyProxy(
     proxy_key=os.environ["FINGERLY_PROXY_KEY"],
     path="/k7x2qm4a",
-    client_ip=lambda request: request.headers.get("cf-connecting-ip") or request.peer_host,
+    client_ip=lambda request: (
+        request.headers.get("cf-connecting-ip") or request.peer_host
+    ),
 )
 ```
 
 `path` is the path the dashboard issued, within your application. With it set,
 the proxy answers that one path, exactly, and anything else gets `404`,
-including anything under it. It excludes anything a sub-URI deployment adds,
+including anything under it, a trailing slash, another letter case, a dot
+segment or a percent-encoded spelling of the same path. It excludes anything a sub-URI deployment adds,
 and a path the mount has already stripped works too, so the same configuration
 serves an app at the root and one served from `/shop`. It is optional: leave it
 out and the proxy answers whatever your framework routes to it, which is safe
@@ -140,7 +143,8 @@ app.add_route("/k7x2qm4a", proxy.asgi)
 ```
 
 A route rather than a mount: Starlette answers a mount's bare path with a
-redirect to its slashed form, and the browser SDK posts to the bare one.
+redirect to its slashed form, the browser SDK posts to the bare one, and the
+proxy does not answer the slashed one.
 
 ### WSGI: Flask, Django's sync stack, Pyramid
 

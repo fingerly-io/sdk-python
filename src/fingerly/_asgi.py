@@ -120,7 +120,16 @@ def _request_from(scope: Scope) -> ProxyRequest:
         ),
         peer_host=client[0] if client else None,
         mount=str(scope.get("root_path", "")),
+        raw_path=_raw_path(scope),
     )
+
+
+def _raw_path(scope: Scope) -> Optional[str]:
+    """The path as the client sent it, when the server reports it."""
+    raw = scope.get("raw_path")
+    if not isinstance(raw, (bytes, bytearray)):
+        return None
+    return bytes(raw).decode("latin-1").split("?", 1)[0]
 
 
 def _app_path(scope: Scope) -> str:
@@ -142,7 +151,7 @@ def _app_path(scope: Scope) -> str:
     if not root_path:
         return path
     if path == root_path:
-        return "/"
+        return ""
     return path[len(root_path) :] if path.startswith(root_path + "/") else path
 
 

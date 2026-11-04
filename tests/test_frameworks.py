@@ -111,16 +111,16 @@ class TestStarlette:
         assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.1.0"
         assert "cookie" not in forwarded.headers
 
-    def test_forwards_from_a_mount_at_the_issued_path(self) -> None:
-        # Starlette redirects the bare mount path to its slashed form, which is
-        # why the README routes instead; mounted, the path still matches.
+    def test_a_mount_at_the_issued_path_answers_nothing(self) -> None:
+        # Starlette redirects the bare mount path to its slashed form, and the
+        # proxy answers the exact path only, which is why the README routes.
         upstream = Upstream()
         app = starlette_applications.Starlette(
             routes=[starlette_routing.Mount(PATH, app=build(upstream).asgi)]
         )
-        responses = self.post(app, [PATH + "/", PATH + "/admin", PATH + "/events"])
-        assert [response.status_code for response in responses] == [200, 404, 404]
-        assert [str(request.url) for request in upstream.requests] == [INGEST]
+        responses = self.post(app, [PATH, PATH + "/", PATH + "/admin"])
+        assert [response.status_code for response in responses] == [307, 404, 404]
+        assert upstream.requests == []
 
     def test_forwards_from_a_deployment_under_a_sub_uri(self) -> None:
         # Nested mounts, which is what a sub-URI deployment looks like: the

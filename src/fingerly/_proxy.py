@@ -116,6 +116,8 @@ class ProxyRequest:
         mount: What the server reported separately as the mount, ``root_path``
             under ASGI and ``SCRIPT_NAME`` under WSGI, including any prefix a
             sub-URI deployment adds.
+        raw_path: The whole path as the client sent it, still percent-encoded
+            and without the query, when the server reports it.
     """
 
     method: str
@@ -123,6 +125,7 @@ class ProxyRequest:
     headers: Headers
     peer_host: Optional[str] = None
     mount: str = ""
+    raw_path: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -435,19 +438,23 @@ class FingerlyProxy:
         """True when the request is for the one path this proxy serves.
 
         Without a configured path, whatever the framework routed here is
-        answered. With one, it is matched exactly, trailing slashes aside, and
-        accepted in either shape the adapters can hand over: present in the
-        application-relative path, when the proxy is routed from above it, or
-        already stripped into the mount, when the proxy is mounted at it. A
-        sub-URI deployment only adds to the front of the mount, so it changes
-        neither.
+        answered. With one, it is matched exactly: case-sensitive, with no
+        trailing slash, nothing under it, no dot segment and nothing
+        percent-encoded. It is accepted in either shape the adapters can hand
+        over: present in the application-relative path, when the proxy is
+        routed from above it, or already stripped into the mount, when the
+        proxy is mounted at it. A sub-URI deployment only adds to the front of
+        the mount, so it changes neither.
         """
         if self._path is None:
             return True
-        local = request.path.rstrip("/")
-        if request.mount.rstrip("/").endswith(self._path):
-            return local == ""
-        return local == self._path
+        if request.raw_path is not None and not _raw_matches(
+            request.raw_path, self._path
+        ):
+            return False
+        if request.mount.endswith(self._path):
+            return request.path == ""
+        return request.path == self._path
 
     def _upstream_key_for(self, presented: Optional[str]) -> Optional[str]:
         """Decides which key to present upstream.
@@ -539,6 +546,19 @@ def _on_the_wire(headers: Mapping[str, str]) -> list[tuple[bytes, bytes]]:
             encoded = value.encode("utf-8")
         wire.append((name.encode("ascii"), encoded))
     return wire
+
+
+def _raw_matches(raw_path: str, path: str) -> bool:
+    """True when the path as sent ends in exactly the configured path.
+
+    Servers decode the path before an application sees it, so ``%2F``,
+    ``%2e%2e`` or an encoded letter would otherwise reach the same route. The
+    configured path is plain, so the raw one must end with it verbatim, and no
+    segment may be a dot segment.
+    """
+    if not raw_path.endswith(path):
+        return False
+    return all(segment not in (".", "..") for segment in raw_path.split("/"))
 
 
 def _is_ip_literal(value: str) -> bool:

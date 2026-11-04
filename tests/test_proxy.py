@@ -48,9 +48,10 @@ def call_wsgi(
     headers: Optional[dict[str, str]] = None,
     body: bytes = b"{}",
     script_name: str = "",
+    raw_uri: Optional[str] = None,
 ) -> tuple[int, dict[str, str], bytes]:
     """Drives a WSGI app and returns its status, headers and body."""
-    environ = {
+    environ: dict[str, Any] = {
         "REQUEST_METHOD": method,
         "SCRIPT_NAME": script_name,
         "PATH_INFO": path,
@@ -58,6 +59,8 @@ def call_wsgi(
         "REMOTE_ADDR": "198.51.100.1",
         "wsgi.input": io.BytesIO(body),
     }
+    if raw_uri is not None:
+        environ["RAW_URI"] = raw_uri
     for name, value in (headers or {}).items():
         if name.lower() == "content-type":
             environ["CONTENT_TYPE"] = value
@@ -82,6 +85,7 @@ def call_asgi(
     body: bytes = b"{}",
     root_path: str = "",
     chunks: int = 1,
+    raw_path: Optional[str] = None,
 ) -> tuple[int, dict[str, str], bytes]:
     """Drives an ASGI app and returns its status, headers and body."""
 
@@ -92,6 +96,7 @@ def call_asgi(
             "path": path,
             "root_path": root_path,
             "client": ("198.51.100.1", 54321),
+            **({} if raw_path is None else {"raw_path": raw_path.encode()}),
             "headers": [
                 (name.lower().encode(), value.encode())
                 for name, value in (headers or {}).items()
@@ -281,19 +286,10 @@ class TestForwarding:
             assert "fingerly" not in " ".join(headers).lower()
             assert "fingerly" not in " ".join(headers.values()).lower()
 
-    def test_answers_the_path_with_a_trailing_slash(self) -> None:
-        recorder = Recorder(json_response({}))
-        for adapter, call in both(proxy(recorder)):
-            status, _, _ = call(
-                adapter, path=PATH + "/", headers={"x-api-key": PUBLIC_KEY}
-            )
-            assert status == 200
-        assert recorder.calls == 2
-
-    @pytest.mark.parametrize("path", ["", "/"])
+    @pytest.mark.parametrize("path", ["", PATH])
     def test_honours_a_mount_at_the_path_from_either_standard(self, path: str) -> None:
         # Mounted at its own path, the proxy sees the path already stripped
-        # into root_path or SCRIPT_NAME, with nothing or a slash left over.
+        # into root_path or SCRIPT_NAME, or, from Starlette 0.47, whole.
         recorder = Recorder(json_response({}))
         mounted = proxy(recorder)
         asgi_status, _, _ = call_asgi(
@@ -304,7 +300,7 @@ class TestForwarding:
         )
         wsgi_status, _, _ = call_wsgi(
             mounted.wsgi,
-            path=path,
+            path="",
             script_name=PATH,
             headers={"x-api-key": PUBLIC_KEY},
         )
@@ -338,7 +334,7 @@ class TestForwarding:
         mounted = proxy(recorder)
         asgi_status, _, _ = call_asgi(
             mounted.asgi,
-            path="/shop" + PATH + "/",
+            path="/shop" + PATH,
             root_path="/shop" + PATH,
             headers={"x-api-key": PUBLIC_KEY},
         )
@@ -416,6 +412,58 @@ class TestRefusals:
         for adapter, call in both(proxy(recorder := Recorder(json_response({})))):
             status, _, _ = call(adapter, path=path, headers={"x-api-key": PUBLIC_KEY})
             assert status == 404
+        assert recorder.calls == 0
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            PATH + "/",
+            PATH + "//",
+            PATH.upper(),
+            PATH[:-1] + "%" + format(ord(PATH[-1]), "02X"),
+            PATH + "%2F",
+            "/x/.." + PATH,
+            "/." + PATH,
+            "/" + PATH,
+        ],
+    )
+    def test_matches_the_path_exactly_as_sent(self, raw: str) -> None:
+        """What a server decodes or normalises must not reach the route."""
+        recorder = Recorder(json_response({}))
+        app = proxy(recorder)
+        decoded = PATH if "%" in raw or ".." in raw or "/." in raw else raw
+        asgi_status, _, _ = call_asgi(
+            app.asgi, path=decoded, raw_path=raw, headers={"x-api-key": PUBLIC_KEY}
+        )
+        wsgi_status, _, _ = call_wsgi(
+            app.wsgi, path=decoded, raw_uri=raw, headers={"x-api-key": PUBLIC_KEY}
+        )
+        assert (asgi_status, wsgi_status) == (404, 404)
+        assert recorder.calls == 0
+
+    def test_accepts_the_exact_path_with_a_query(self) -> None:
+        recorder = Recorder(json_response({}))
+        app = proxy(recorder)
+        call_asgi(app.asgi, raw_path=PATH, headers={"x-api-key": PUBLIC_KEY})
+        status, _, _ = call_wsgi(
+            app.wsgi, raw_uri=PATH + "?v=1", headers={"x-api-key": PUBLIC_KEY}
+        )
+        assert status == 200
+        assert recorder.calls == 2
+
+    def test_refuses_a_trailing_slash_under_a_mount(self) -> None:
+        recorder = Recorder(json_response({}))
+        mounted = proxy(recorder)
+        asgi_status, _, _ = call_asgi(
+            mounted.asgi,
+            path=PATH + "/",
+            root_path=PATH,
+            headers={"x-api-key": PUBLIC_KEY},
+        )
+        wsgi_status, _, _ = call_wsgi(
+            mounted.wsgi, path="/", script_name=PATH, headers={"x-api-key": PUBLIC_KEY}
+        )
+        assert (asgi_status, wsgi_status) == (404, 404)
         assert recorder.calls == 0
 
     @pytest.mark.parametrize("path", ["/admin", PATH])

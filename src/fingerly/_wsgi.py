@@ -66,7 +66,21 @@ def _request_from(environ: Environ) -> ProxyRequest:
         headers=_headers_from(environ),
         peer_host=environ.get("REMOTE_ADDR"),
         mount=environ.get("SCRIPT_NAME", ""),
+        raw_path=_raw_path(environ),
     )
+
+
+def _raw_path(environ: Environ) -> Optional[str]:
+    """The path as the client sent it, where the server reports it.
+
+    WSGI does not define one, but most servers pass the request target on as
+    ``RAW_URI`` or ``REQUEST_URI``.
+    """
+    for key in ("RAW_URI", "REQUEST_URI"):
+        value = environ.get(key)
+        if isinstance(value, str) and value:
+            return value.split("?", 1)[0]
+    return None
 
 
 def _headers_from(environ: Environ) -> Headers:
