@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 import pytest
 
+import fingerly._webhooks as webhooks
 from fingerly import verify_webhook
 
 PAYLOAD = b'{"id":"evt_1","type":"identification.completed"}'
@@ -52,6 +53,28 @@ class TestAuthenticity:
         assert verify_webhook("new", PAYLOAD, TIMESTAMP, header, now=at(0))
         assert verify_webhook("old", PAYLOAD, TIMESTAMP, header, now=at(0))
         assert not verify_webhook("other", PAYLOAD, TIMESTAMP, header, now=at(0))
+
+    def test_reads_only_the_first_32_signatures(self) -> None:
+        decoys = ["sha256=" + "0" * 64] * 31
+        within = ",".join([*decoys, sign("secret")])
+        beyond = ",".join([*decoys, "sha256=" + "1" * 64, sign("secret")])
+        assert verify_webhook("secret", PAYLOAD, TIMESTAMP, within, now=at(0))
+        assert not verify_webhook("secret", PAYLOAD, TIMESTAMP, beyond, now=at(0))
+
+    def test_a_huge_signature_header_costs_no_more_than_32(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        compared: list[str] = []
+        real = webhooks._matches
+
+        def counting(candidate: str, expected: bytes) -> bool:
+            compared.append(candidate)
+            return real(candidate, expected)
+
+        monkeypatch.setattr(webhooks, "_matches", counting)
+        header = ",".join(["sha256=" + "0" * 64] * 200_000)
+        assert not verify_webhook("secret", PAYLOAD, TIMESTAMP, header, now=at(0))
+        assert len(compared) == 32
 
 
 class TestReplayWindow:

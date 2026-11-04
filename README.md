@@ -87,7 +87,8 @@ valid = verify_webhook(
 Verify the exact raw bytes before JSON parsing. Signatures cover the timestamp
 and body. The default replay tolerance is 300 seconds; persist processed webhook
 IDs to deduplicate deliveries. During signing-secret rotation, any matching
-signature in the comma-separated header is accepted. The function never raises
+signature in the comma-separated header is accepted; only the first 32 are
+read. The function never raises
 for malformed input: bad input is a failed verification, not an exception.
 
 ## Closing

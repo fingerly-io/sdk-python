@@ -14,6 +14,10 @@ from typing import Optional, Union
 
 DEFAULT_TOLERANCE_SECONDS = 300
 
+#: Signatures read from one header. A rotation sends two or three; past this
+#: many the rest are ignored, so a huge header costs no more than this.
+MAX_SIGNATURES = 32
+
 #: A lowercase hex digest, exactly as Fingerly sends it.
 _SIGNATURE = re.compile(r"\Asha256=[a-f0-9]{64}\Z")
 
@@ -36,6 +40,7 @@ def verify_webhook(
     Pass the exact bytes received, before any JSON parsing: re-serialising
     them changes the digest. During a signing-secret rotation Fingerly sends
     several comma-separated signatures, and any one matching is accepted.
+    Only the first 32 are read.
 
     Verification proves the delivery came from Fingerly and is recent. It does
     not deduplicate, so persist processed event ids as well.
@@ -65,7 +70,8 @@ def verify_webhook(
         return False
 
     expected = _sign(secret, timestamp, payload)
-    return any(_matches(candidate, expected) for candidate in signature.split(","))
+    candidates = signature.split(",", MAX_SIGNATURES)[:MAX_SIGNATURES]
+    return any(_matches(candidate, expected) for candidate in candidates)
 
 
 def _is_fresh(
