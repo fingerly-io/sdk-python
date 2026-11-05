@@ -478,6 +478,14 @@ stretch it. The default is 10 seconds for the clients and 5 for the proxy.
 Response bodies over 4 MiB are refused rather than buffered: the clients raise
 `FingerlyAPIError` with code `response_too_large`.
 
+Under a thread or process server (gunicorn sync or gthread workers, Django or
+Flask under WSGI), size the pool for the slow case, not the average one: while
+Fingerly is slow, every proxied request holds its thread for the whole
+`timeout`. At 100 proxied requests a second with 1% of them running into a 5
+second timeout, that is 5 threads busy on average, before any fast request is
+served. Run more threads than that, lower `timeout` for the proxy, or serve
+through `proxy.asgi`, where a waiting request holds no thread.
+
 ## Connections
 
 Each client, and each proxy handler, keeps its connections open between
