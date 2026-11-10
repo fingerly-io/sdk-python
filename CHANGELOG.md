@@ -2,7 +2,7 @@
 
 ## 0.1.0
 
-Not yet published. The first release.
+The first release.
 
 - `Fingerly` and `AsyncFingerly` read events with a server-only secret key.
   Every status outside 2xx, redirects included, raises `FingerlyAPIError`
