@@ -42,7 +42,13 @@ class WSGIProxy:
         if screening.refusal is not None:
             return _write(start_response, screening.refusal)
 
-        body = _read_body(environ, self._proxy.max_body_bytes)
+        try:
+            body = _read_body(environ, self._proxy.max_body_bytes)
+        except Exception:
+            # A visitor can send broken framing at will. Servers report it with
+            # types of their own, none shared, and uncaught each one is an
+            # error-level traceback in the server's log.
+            return _write(start_response, self._proxy.malformed())
         if body is None:
             return _write(start_response, self._proxy.too_large())
 
@@ -106,8 +112,10 @@ def _read_body(environ: Environ, max_bytes: int) -> Optional[bytes]:
     With a declared length, exactly that many bytes are read and never one
     more: PEP 3333 forbids reading past ``CONTENT_LENGTH``, and servers that
     hand over the raw socket (Werkzeug's ``flask run``, wsgiref) block on the
-    extra byte until the client gives up. Without one, the server must have
-    terminated the stream, and one byte past the limit is enough to refuse.
+    extra byte until the client gives up. Without one there is a body only when
+    it is chunked, and then the server has terminated the stream, so one byte
+    past the limit is enough to refuse. Anything else has no body, and reading
+    that raw socket would wait for bytes that are never coming.
 
     Returns:
         The bytes, or None when the limit was exceeded.
@@ -116,11 +124,15 @@ def _read_body(environ: Environ, max_bytes: int) -> Optional[bytes]:
     if stream is None:
         return b""
     declared = environ.get("CONTENT_LENGTH", "")
-    if declared.isdigit():
+    if declared.isdecimal():
         length = int(declared)
         if length > max_bytes:
             return None
         return stream.read(length) if length else b""
+    if "HTTP_TRANSFER_ENCODING" not in environ and not environ.get(
+        "wsgi.input_terminated"
+    ):
+        return b""
     body: bytes = stream.read(max_bytes + 1)
     return None if len(body) > max_bytes else body
 

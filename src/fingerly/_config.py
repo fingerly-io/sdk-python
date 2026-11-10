@@ -12,6 +12,8 @@ from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import NamedTuple
 from urllib.parse import urlsplit
 
+import httpx
+
 #: Anchored with ``\A``/``\Z`` because Python's ``$`` also matches before a
 #: trailing newline, which would let ``"fly_sk_production_x\n"`` through.
 _KEY = re.compile(r"\Afly_(pk|sk|px)_(production|staging|development)_[A-Za-z0-9_-]+\Z")
@@ -100,7 +102,13 @@ def normalize_endpoint(value: str) -> str:
     """
     if not isinstance(value, str):
         raise TypeError("endpoint must be a string")
-    parts = urlsplit(value)
+    problem = "endpoint must be an HTTP(S) URL without credentials, query, or fragment"
+    try:
+        parts = urlsplit(value)
+        _ = parts.port  # Validated on access, not by urlsplit.
+        httpx.URL(value)  # What every request will build it with.
+    except (ValueError, httpx.InvalidURL):
+        raise TypeError(problem) from None
     if (
         parts.scheme not in ("http", "https")
         or not parts.hostname
@@ -108,10 +116,9 @@ def normalize_endpoint(value: str) -> str:
         or parts.password
         or parts.query
         or parts.fragment
+        or any(character.isspace() for character in value)
     ):
-        raise TypeError(
-            "endpoint must be an HTTP(S) URL without credentials, query, or fragment"
-        )
+        raise TypeError(problem)
     return value.rstrip("/")
 
 

@@ -38,6 +38,7 @@ if TYPE_CHECKING:  # Imported for typing only; the adapters import this module.
 
 from ._config import (
     DEFAULT_ENDPOINT,
+    REDACTED,
     KeyScope,
     Secret,
     no_cookies,
@@ -165,6 +166,13 @@ class Screening(NamedTuple):
     refusal: Optional[ProxyResponse]
     api_key: str = ""
     client_ip: str = ""
+
+    def __repr__(self) -> str:
+        # In the deprecated secret-key mode ``api_key`` is the secret itself.
+        return (
+            f"Screening(refusal={self.refusal!r}, api_key={REDACTED}, "
+            f"client_ip={self.client_ip!r})"
+        )
 
 
 class BodyTooLargeError(Exception):
@@ -313,7 +321,7 @@ class FingerlyProxy:
 
         # Refuse on the declared size first; the adapter enforces the real one.
         declared = request.headers.get("content-length", "")
-        if declared.isdigit() and int(declared) > self._max_body_bytes:
+        if declared.isdecimal() and int(declared) > self._max_body_bytes:
             return Screening(_refuse(413, "Payload Too Large"))
 
         client_ip = self._resolve_client_ip(request)
@@ -325,6 +333,14 @@ class FingerlyProxy:
     def too_large(self) -> ProxyResponse:
         """The response for a body that exceeded the limit while streaming."""
         return _refuse(413, "Payload Too Large")
+
+    def client_gone(self) -> ProxyResponse:
+        """The response recorded for a visitor who disconnected first."""
+        return _refuse(499, "Client closed request")
+
+    def malformed(self) -> ProxyResponse:
+        """The response for a request body the server could not read."""
+        return _refuse(400, "Bad Request")
 
     def forward(
         self, screening: Screening, request: ProxyRequest, body: bytes
@@ -547,7 +563,9 @@ def _on_the_wire(headers: Mapping[str, str]) -> list[tuple[bytes, bytes]]:
         try:
             encoded = value.encode("latin-1")
         except UnicodeEncodeError:
-            encoded = value.encode("utf-8")
+            # "replace", as some servers decode with surrogateescape and a
+            # strict encode would raise on bytes the visitor chose.
+            encoded = value.encode("utf-8", "replace")
         wire.append((name.encode("ascii"), encoded))
     return wire
 
@@ -625,11 +643,15 @@ def _relay(reply: Reply) -> ProxyResponse:
 
     The body was read in full before this runs, so a truncated answer is a
     failure rather than a success. The length is recomputed because httpx has
-    already decoded the body, and the result is marked uncacheable.
+    already decoded the body, and the result is marked uncacheable. A value
+    that is not ASCII is dropped, because servers write headers as Latin-1 and
+    would raise while answering a request that had already succeeded.
     """
     body = b"" if reply.status in BODILESS_STATUSES else reply.body
     headers = [
-        (name, reply.headers[name]) for name in RELAYED_HEADERS if name in reply.headers
+        (name, reply.headers[name])
+        for name in RELAYED_HEADERS
+        if name in reply.headers and reply.headers[name].isascii()
     ]
     headers.append(("cache-control", "no-store"))
     if reply.status not in BODILESS_STATUSES:

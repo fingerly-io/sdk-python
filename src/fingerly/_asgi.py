@@ -8,6 +8,7 @@ types, so the two standards cannot drift apart.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, MutableMapping
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -58,13 +59,27 @@ class ASGIProxy:
             await _send(send, self._proxy.too_large())
             return
         if body is None:
-            return  # The client went away; there is nobody to answer.
+            await self._answer_nobody(send)
+            return
 
         response = await _forward_unless_gone(
             self._proxy.aforward(screening, request, body), receive
         )
-        if response is not None:
+        if response is None:
+            await self._answer_nobody(send)
+        else:
             await _send(send, response)
+
+    async def _answer_nobody(self, send: Send) -> None:
+        """Finishes a request whose visitor has already gone.
+
+        Nobody reads this, but an app that ends without a response is an error
+        to Starlette's ``BaseHTTPMiddleware``, which would log a traceback for
+        every tab closed during an identification.
+        """
+        # ASGI 2.4 lets a server refuse a send on a closed connection.
+        with contextlib.suppress(OSError):
+            await _send(send, self._proxy.client_gone())
 
 
 async def _forward_unless_gone(

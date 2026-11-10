@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import math
+import ssl
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -154,9 +155,27 @@ class _DeadlineBackend:
         self._inner.sleep(seconds)
 
 
+_tls_context: Optional[ssl.SSLContext] = None
+_tls_context_lock = threading.Lock()
+
+
+def _shared_tls_context() -> ssl.SSLContext:
+    """One TLS context per process, however many small pools there are.
+
+    Each context loads the whole CA bundle. Built per pool, the 64 pools behind
+    256 connections took 49 MB and up to 0.9 s, under the pool's lock or on the
+    event loop, and again at every recycle.
+    """
+    global _tls_context
+    with _tls_context_lock:
+        if _tls_context is None:
+            _tls_context = httpx.create_ssl_context()
+        return _tls_context
+
+
 def _sync_transport(limits: httpx.Limits) -> httpx.HTTPTransport:
     """A transport whose sockets stop at the calling thread's deadline."""
-    transport = httpx.HTTPTransport(limits=limits)
+    transport = httpx.HTTPTransport(limits=limits, verify=_shared_tls_context())
     pool = getattr(transport, "_pool", None)
     backend = getattr(pool, "_network_backend", None)
     if backend is not None:
@@ -345,7 +364,11 @@ class AsyncPool:
         def make(pool_limits: Optional[httpx.Limits]) -> httpx.AsyncClient:
             if pool_limits is None:
                 return build(transport)
-            return build(httpx.AsyncHTTPTransport(limits=pool_limits))
+            return build(
+                httpx.AsyncHTTPTransport(
+                    limits=pool_limits, verify=_shared_tls_context()
+                )
+            )
 
         self._deadline = deadline
         self._shards: _Shards[httpx.AsyncClient] = _Shards(

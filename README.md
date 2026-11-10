@@ -195,7 +195,9 @@ a browser by construction.
 
 The browser must present a public key from the same environment as the proxy
 key, or the request gets `401`. Bodies over 1 MiB get `413`, enforced
-while streaming rather than after buffering. Responses are marked `no-store`.
+while streaming rather than after buffering, and under WSGI a body the server
+cannot read, such as broken chunked framing, gets `400`. Responses are marked
+`no-store`.
 
 Only the content type, the visitor metadata Fingerly needs, and an
 `idempotency-key` are forwarded. Customer cookies and authorization headers are

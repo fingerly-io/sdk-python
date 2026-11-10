@@ -22,7 +22,10 @@ MAX_SIGNATURES = 32
 _SIGNATURE = re.compile(r"\Asha256=[a-f0-9]{64}\Z")
 
 #: Whole unsigned seconds; anything else is not a timestamp Fingerly signed.
-_TIMESTAMP = re.compile(r"\A[0-9]+\Z")
+#: Bounded because the header is the sender's to write: hundreds of digits
+#: overflow the comparison with the clock, and thousands exceed what ``int``
+#: will parse, and this function promises not to raise.
+_TIMESTAMP = re.compile(r"\A[0-9]{1,20}\Z")
 
 _PREFIX_LENGTH = len("sha256=")
 

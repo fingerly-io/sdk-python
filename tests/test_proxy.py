@@ -841,7 +841,7 @@ class TestDisconnect:
             return sent
 
         started = time.monotonic()
-        assert run(drive()) == []
+        assert run(drive())[0]["status"] == 499
         assert time.monotonic() - started < 2
         assert state["cancelled"] is True
 

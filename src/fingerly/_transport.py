@@ -54,7 +54,10 @@ def event_path(request_id: str) -> str:
     Args:
         request_id: The ``request_id`` returned by identification.
     """
-    return f"/events/{quote(str(request_id), safe='')}"
+    # quote() leaves dots alone and httpx removes a "." or ".." segment before
+    # sending, so an id of "." would read the event list instead of one event.
+    # The id usually comes from the browser.
+    return f"/events/{quote(str(request_id), safe='').replace('.', '%2E')}"
 
 
 def list_params(
@@ -152,7 +155,7 @@ def retry_after_seconds(
     if value is None:
         return None
     text = value.strip()
-    if text.isdigit():
+    if text.isdecimal():  # isdigit() also accepts "²", which float() refuses.
         return float(text)
     try:
         moment = parsedate_to_datetime(text)
