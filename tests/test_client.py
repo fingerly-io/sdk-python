@@ -134,6 +134,28 @@ class TestEventReads:
         with pytest.raises(AttributeError):
             _ = event.no_such_field
 
+    def test_exposes_the_project_the_event_belongs_to(self) -> None:
+        project_id = "0199a963-e400-7000-8000-0000000000a1"
+        recorder = Recorder(
+            json_response(event_body(project_id=project_id)),
+            json_response(
+                {"rows": [event_body(project_id=project_id)], "page": 1, "page_size": 1}
+            ),
+        )
+        with client(recorder) as fingerly:
+            event = fingerly.events.get("request-1")
+            page = fingerly.events.list(limit=1)
+
+        assert event.project_id == project_id
+        assert page.rows[0].project_id == project_id
+
+    def test_reads_an_event_from_a_server_that_omits_project_id(self) -> None:
+        recorder = Recorder(json_response(event_body()))
+        with client(recorder) as fingerly:
+            event = fingerly.events.get("request-1")
+
+        assert event.project_id is None
+
     def test_keeps_an_unscored_event_distinct_from_zero(self) -> None:
         recorder = Recorder(json_response(event_body(suspect_score=None)))
         with client(recorder) as fingerly:
