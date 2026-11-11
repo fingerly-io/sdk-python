@@ -1,5 +1,19 @@
 # Changelog
 
+### Unreleased
+
+- `Event.project_id` is the Fingerly project an event belongs to, on single
+  reads and list rows; `None` when the server does not send it. Webhook `data`
+  for `identification.completed` and `visitor.suspect` (and
+  `identification.refused` when the key was known) carries `project_id`.
+- `Event.ip_address` is removed; `Event.ip_network` (an IPv4 /24 or an IPv6
+  /40, `None` when absent) replaces it. The API no longer returns the address.
+- `Event.deferred_signals` is removed; the API no longer returns the deferred
+  report.
+- `Event.document` is now an allow-listed view of the archived request, with
+  no raw signals, user agent or address.
+- The vendored contract snapshot is refreshed.
+
 ## 0.1.0
 
 The first release.

@@ -48,7 +48,10 @@ them. Every status outside 2xx raises it, a redirect included, since requests
 never follow one. `FingerlyTimeoutError` and `FingerlyConnectionError` cover a
 deadline and an unreachable API; all three derive from `FingerlyError`.
 
-The archived `document` and `deferred_signals` are included when available.
+`ip_network` is the network the request came from (an IPv4 /24 or an IPv6
+/40, such as `203.0.113.0/24`); the API never returns the address. `document`,
+when available, is an allow-listed view of the archived request with no raw
+signals, user agent or address.
 `suspect_score` is `None` when the request was not scored, and must not be
 treated as zero. `Event` declares every documented field as an attribute and
 falls back to the decoded body for fields added later, so a new server field
