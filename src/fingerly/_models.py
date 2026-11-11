@@ -46,6 +46,8 @@ class Event:
     detail whose contents are deliberately opaque, not a public contract.
 
     Attributes:
+        project_id: The Fingerly project the event belongs to, as a UUID
+            string. ``None`` when an older server did not send it.
         raw: The decoded response body. Fields this SDK does not declare are
             readable as attributes through it.
     """
@@ -65,6 +67,7 @@ class Event:
     suspect_level: Optional[str] = None
     origin: Optional[str] = None
     tag: Optional[str] = None
+    project_id: Optional[str] = None
     country_code: Optional[str] = None
     country_name: Optional[str] = None
     asn: Optional[str] = None
@@ -140,6 +143,7 @@ def parse_event(payload: Mapping[str, Any]) -> Event:
         suspect_level=payload.get("suspect_level"),
         origin=payload.get("origin"),
         tag=payload.get("tag"),
+        project_id=payload.get("project_id"),
         country_code=payload.get("country_code"),
         country_name=payload.get("country_name"),
         asn=payload.get("asn"),

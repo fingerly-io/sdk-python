@@ -69,6 +69,7 @@ class TestResponseFixtures:
         assert event.request_id == body["request_id"]
         assert event.visitor_id == body["visitor_id"]
         assert event.suspect_score == body.get("suspect_score")
+        assert event.project_id == body.get("project_id")
         assert len(event.triggers) == len(body["triggers"])
         assert event.raw == body
 
@@ -86,6 +87,9 @@ class TestResponseFixtures:
         assert (page.page, page.page_size) == (body["page"], body["page_size"])
         assert [row.request_id for row in page.rows] == [
             row["request_id"] for row in body["rows"]
+        ]
+        assert [row.project_id for row in page.rows] == [
+            row.get("project_id") for row in body["rows"]
         ]
 
     @pytest.mark.parametrize(
