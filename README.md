@@ -1,10 +1,41 @@
-# fingerly
+<p align="center">
+  <a href="https://fingerly.io">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/fingerly-io/.github/main/assets/logo-dark.svg">
+      <img src="https://raw.githubusercontent.com/fingerly-io/.github/main/assets/logo-light.svg" alt="Fingerly" height="44">
+    </picture>
+  </a>
+</p>
 
-Server-side event reads, webhook verification and a same-origin proxy for
-Python. Two clients share one API: `Fingerly` for synchronous code such as
-Django and Flask, and `AsyncFingerly` for asyncio code such as FastAPI and
-Starlette. Python 3.9 or newer. One runtime dependency, `httpx`. The proxy
-serves both ASGI and WSGI, so it mounts under either.
+<p align="center"><b>Fingerly for Python</b><br>Read events, verify webhooks and serve a first-party proxy from your Python backend, with sync and asyncio clients.</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/fingerly/"><img src="https://img.shields.io/pypi/v/fingerly?style=flat-square" alt="PyPI version"></a>
+  <a href="https://github.com/fingerly-io/sdk-python/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/fingerly-io/sdk-python/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
+  <img src="https://img.shields.io/badge/python-3.9%2B-blue?style=flat-square" alt="Python 3.9 or newer">
+  <a href="https://github.com/fingerly-io/sdk-python/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="Apache-2.0 licence"></a>
+  <a href="https://docs.fingerly.io/docs/sdks/python"><img src="https://img.shields.io/badge/docs-docs.fingerly.io-blue?style=flat-square" alt="Documentation"></a>
+</p>
+
+<p align="center"><img src="https://raw.githubusercontent.com/fingerly-io/.github/main/assets/banner.webp" alt="Fingerly" width="100%"></p>
+
+## What is this
+
+`fingerly` is the server-side Python package for [Fingerly](https://fingerly.io), which identifies the device behind every web and app session and scores how suspicious it is. Use it to protect signups, logins and payments: read the event the browser SDK produced with a server-only secret key, verify webhook signatures, and relay the browser SDK's traffic through your own domain.
+
+Two clients share one API: `Fingerly` for synchronous code such as Django and Flask, and `AsyncFingerly` for asyncio code such as FastAPI and Starlette. Python 3.9 or newer. One runtime dependency, `httpx`. The proxy serves both ASGI and WSGI, so it mounts under either.
+
+## Getting started
+
+**1. Prerequisites.** A Fingerly account and a secret key (see [API keys and environments](https://docs.fingerly.io/docs/api-keys)). A webhook signing secret to verify webhooks, and a proxy key (see [Proxy integrations](https://docs.fingerly.io/docs/proxy-integrations)) for the proxy.
+
+**2. Install.**
+
+```sh
+pip install fingerly
+```
+
+**3. Read an event.**
 
 ```python
 import os
@@ -14,6 +45,8 @@ fingerly = Fingerly(secret_key=os.environ["FINGERLY_SECRET_KEY"])
 page = fingerly.events.list(level="high", limit=50)
 event = fingerly.events.get(page.rows[0].request_id)
 ```
+
+The same with `AsyncFingerly`:
 
 ```python
 import asyncio
@@ -31,69 +64,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-In a web app, build the client once and reuse it: see
-[Framework guides](#framework-guides) for FastAPI, Django and Flask.
-
-Event reads require `fly_sk_{production|staging|development}_…` keys. Requests
-go to `https://api.fingerly.io`; `endpoint` overrides that for a local API.
-Public, proxy, management, malformed and unsupported keys are rejected before
-network access. Requests do not follow redirects. `get` and `list` each perform
-one request and never retry.
-
-`FingerlyAPIError` provides `status`, and optional `code`, `details`,
-`request_id` and `retry_after`, the seconds a `429`, a `503` or a
-`404 event_pending` asks you to wait
-(`None` when the response did not say). The secret key is stripped from all of
-them. Every status outside 2xx raises it, a redirect included, since requests
-never follow one. `FingerlyTimeoutError` and `FingerlyConnectionError` cover a
-deadline and an unreachable API; all three derive from `FingerlyError`.
-
-`ip_network` is the network the request came from (an IPv4 /24 or an IPv6
-/40, such as `203.0.113.0/24`); the API never returns the address. `document`,
-when available, is an allow-listed view of the archived request with no raw
-signals, user agent or address.
-`suspect_score` is `None` when the request was not scored, and must not be
-treated as zero. `Event` declares every documented field as an attribute and
-falls back to the decoded body for fields added later, so a new server field
-needs no SDK upgrade.
-
-`project_id` is the UUID string of the Fingerly project the event belongs to,
-on both `events.get` and the rows of `events.list`; it is `None` when an older
-server does not send it.
-
-## Read an event you just identified
-
-Send the `requestId` the browser SDK returned to your server and read it there
-with `fingerly.events.get(request_id)`, or
-`await fingerly.events.get(request_id)` with `AsyncFingerly`. A `404` carries
-one of two codes:
-
-- `event_pending` raises `FingerlyEventPendingError`, a `FingerlyAPIError`: the
-  request id was accepted but its event is not recorded yet. It is not a
-  verdict. Try again after `retry_after` seconds, or verify asynchronously, for
-  example from a webhook. The SDK never retries on its own.
-- `event_not_found` raises a plain `FingerlyAPIError`: the request id was never
-  issued for this key's environment, or the event is past the 30-day
-  retention.
-
-The archived `document` arrives moments after the event itself, so check
-`has_document` rather than assuming it is there.
-
-## Verify a backend action
-
-Read the event with a server-only key. Check that its tag matches your action,
-that it is recent, that its environment is correct, and that it was scored.
-Apply your own policy to the server's verdict. Do not authorize an action using
-scores or visitor identifiers supplied by the browser. Tags correlate events;
-they do not replace your application's authentication or replay protection.
-A tag must never hold a personal identifier, such as a user ID, email, install
-ID or advertising ID, because the server keeps tags in long-lived rollups.
-A `FingerlyEventPendingError` means the server has not decided yet: retry after
-`retry_after` seconds or verify asynchronously, and do not refuse the action as
-fraud on that answer alone. The framework guides below answer it with `503` and
-`Retry-After`.
-
-## Webhooks
+**4. Verify a webhook.**
 
 ```python
 import os
@@ -119,49 +90,92 @@ def fingerly_webhook():
     return "", 204
 ```
 
-`identification.completed` and `visitor.suspect` deliveries carry the event's
-project as `data["project_id"]`; `identification.refused` carries it only when
-the refused request named a known key. The SDK passes the payload through
-unmodelled, so read it from the parsed JSON.
+In a web app, build the client once and reuse it: see [Framework guides](#framework-guides) for FastAPI, Django and Flask.
 
-Verify the exact raw bytes before JSON parsing. Signatures cover the timestamp
-and body. The default replay tolerance is 300 seconds; persist processed webhook
-IDs to deduplicate deliveries. During signing-secret rotation, any matching
-signature in the comma-separated header is accepted; only the first 32 are
-read. The function never raises for malformed input: bad input is a failed
-verification, not an exception.
+Full documentation: [docs.fingerly.io/docs/sdks/python](https://docs.fingerly.io/docs/sdks/python).
 
-## Closing
+## Choose what you need
 
-Each client holds pooled connections. Build one and reuse it; build one per
-event loop for `AsyncFingerly`.
+| I want to | Go to |
+| --- | --- |
+| Read an event, or verify a backend action | [Read events](#read-events) |
+| Check a webhook signature | [Verify webhooks](#verify-webhooks) |
+| Keep identification working behind content blockers | [First-party proxy](#first-party-proxy) |
+| Mount the proxy in FastAPI, Django or Flask | [Framework guides](#framework-guides) |
+| Tune deadlines, pools and the API version | [Timeouts](#timeouts), [Connections](#connections), [API version](#api-version) |
 
-> **Never call `Fingerly` from `async def` code.** It blocks the event loop for
-> the whole request, so every other request on that worker waits behind it:
-> five reads against a slow API stall a FastAPI worker for five timeouts in a
-> row. Use `AsyncFingerly` there, or a plain `def` route, which FastAPI and
-> Starlette run in a thread. `Fingerly` raises a `RuntimeWarning`, once per
-> process, when it finds itself on a running event loop.
+## Contents
+
+- [Read events](#read-events)
+- [Verify webhooks](#verify-webhooks)
+- [First-party proxy](#first-party-proxy)
+- [Framework guides](#framework-guides)
+- [Timeouts](#timeouts)
+- [Connections](#connections)
+- [API version](#api-version)
+- [Development and release preparation](#development-and-release-preparation)
+- [Requirements](#requirements)
+- [Documentation](#documentation)
+- [Help](#help)
+- [Licence](#licence)
+
+## Read events
+
+Event reads require `fly_sk_{production|staging|development}_…` keys. Requests go to `https://api.fingerly.io`; `endpoint` overrides that for a local API. Public, proxy, management, malformed and unsupported keys are rejected before network access. Requests do not follow redirects. `get` and `list` each perform one request and never retry.
 
 | | `Fingerly` | `AsyncFingerly` |
 | --- | --- | --- |
 | Calls | `fingerly.events.get(id)` | `await fingerly.events.get(id)` |
 | Closing | `fingerly.close()` or `with Fingerly(...) as fingerly:` | `await fingerly.aclose()` or `async with AsyncFingerly(...) as fingerly:` |
 
-## Same-origin proxy
+Each client holds pooled connections. Build one and reuse it; build one per event loop for `AsyncFingerly`.
 
-Content blockers refuse browser requests to third-party APIs, and a refused
-identification is a visitor never identified. Mount the proxy on a path of your
-own site and those requests become first-party. The proxy key is what lets that
-hop declare the visitor's real address, origin and user agent; a public key
-alone never can, so nobody can spoof them.
+> **Never call `Fingerly` from `async def` code.** It blocks the event loop for the whole request, so every other request on that worker waits behind it: five reads against a slow API stall a FastAPI worker for five timeouts in a row. Use `AsyncFingerly` there, or a plain `def` route, which FastAPI and Starlette run in a thread. `Fingerly` raises a `RuntimeWarning`, once per process, when it finds itself on a running event loop.
 
-Create a proxy in the dashboard (**Integration > Proxy keys**). It issues the
-proxy key and a random path, such as `/k7x2qm4a`, for you to serve it on. One
-`FingerlyProxy` holds the configuration and exposes both server standards, so a
-project running each gets the same behaviour from one instance.
+### Read an event you just identified
+
+Send the `requestId` the browser SDK returned to your server and read it there with `fingerly.events.get(request_id)`, or `await fingerly.events.get(request_id)` with `AsyncFingerly`. A `404` carries one of two codes:
+
+| Code | Raises | Meaning |
+| --- | --- | --- |
+| `event_pending` | `FingerlyEventPendingError`, a `FingerlyAPIError` | The request id was accepted but its event is not recorded yet. It is not a verdict. Try again after `retry_after` seconds, or verify asynchronously, for example from a webhook. The SDK never retries on its own. |
+| `event_not_found` | a plain `FingerlyAPIError` | The request id was never issued for this key's environment, or the event is past the 30-day retention. |
+
+The archived `document` arrives moments after the event itself, so check `has_document` rather than assuming it is there.
+
+### Event fields
+
+- `ip_network` is the network the request came from (an IPv4 /24 or an IPv6 /40, such as `203.0.113.0/24`); the API never returns the address.
+- `document`, when available, is an allow-listed view of the archived request with no raw signals, user agent or address.
+- `suspect_score` is `None` when the request was not scored, and must not be treated as zero.
+- `project_id` is the UUID string of the Fingerly project the event belongs to, on both `events.get` and the rows of `events.list`; it is `None` when an older server does not send it.
+- `Event` declares every documented field as an attribute and falls back to the decoded body for fields added later, so a new server field needs no SDK upgrade.
+
+### Errors
+
+`FingerlyAPIError` provides `status`, and optional `code`, `details`, `request_id` and `retry_after`, the seconds a `429`, a `503` or a `404 event_pending` asks you to wait (`None` when the response did not say). The secret key is stripped from all of them. Every status outside 2xx raises it, a redirect included, since requests never follow one. `FingerlyTimeoutError` and `FingerlyConnectionError` cover a deadline and an unreachable API; all three derive from `FingerlyError`.
+
+### Verify a backend action
+
+Read the event with a server-only key. Check that its tag matches your action, that it is recent, that its environment is correct, and that it was scored. Apply your own policy to the server's verdict. Do not authorize an action using scores or visitor identifiers supplied by the browser. Tags correlate events; they do not replace your application's authentication or replay protection. A tag must never hold a personal identifier, such as a user ID, email, install ID or advertising ID, because the server keeps tags in long-lived rollups. A `FingerlyEventPendingError` means the server has not decided yet: retry after `retry_after` seconds or verify asynchronously, and do not refuse the action as fraud on that answer alone. The framework guides below answer it with `503` and `Retry-After`.
+
+## Verify webhooks
+
+The example under [Getting started](#getting-started) verifies a delivery in Flask.
+
+`identification.completed` and `visitor.suspect` deliveries carry the event's project as `data["project_id"]`; `identification.refused` carries it only when the refused request named a known key. The SDK passes the payload through unmodelled, so read it from the parsed JSON.
+
+Verify the exact raw bytes before JSON parsing. Signatures cover the timestamp and body. The default replay tolerance is 300 seconds; persist processed webhook IDs to deduplicate deliveries. During signing-secret rotation, any matching signature in the comma-separated header is accepted; only the first 32 are read. The function never raises for malformed input: bad input is a failed verification, not an exception.
+
+## First-party proxy
+
+Content blockers refuse browser requests to third-party APIs, and a refused identification is a visitor never identified. Mount the proxy on a path of your own site and those requests become first-party. The proxy key is what lets that hop declare the visitor's real address, origin and user agent; a public key alone never can, so nobody can spoof them.
+
+Create a proxy in the dashboard (**Integration > Proxy keys**). It issues the proxy key and a random path, such as `/k7x2qm4a`, for you to serve it on. One `FingerlyProxy` holds the configuration and exposes both server standards, so a project running each gets the same behaviour from one instance.
 
 ```python
+import os
+
 from fingerly import FingerlyProxy
 
 proxy = FingerlyProxy(
@@ -173,121 +187,85 @@ proxy = FingerlyProxy(
 )
 ```
 
-`path` is the path the dashboard issued, within your application. With it set,
-the proxy answers that one path, exactly, and anything else gets `404`,
-including anything under it, a trailing slash, another letter case, a dot
-segment or a percent-encoded spelling of the same path. It excludes anything a
-sub-URI deployment adds, and a path the mount has already stripped works too,
-so the same configuration serves an app at the root and one served from
-`/shop`. It is optional: leave it
-out and the proxy answers whatever your framework routes to it, which is safe
-only where the framework routes that one path and nothing else. There is no
-default path. Use the one the dashboard issued rather than inventing one:
-blockers look for words such as `fingerprint`, `tracking` and `fingerly`.
-
-Serve `proxy.asgi` under an async framework (FastAPI, Starlette, Django's
-ASGI stack, Quart, Litestar) and `proxy.wsgi` under a sync one (Flask, Django's
-WSGI stack, Pyramid). Under Starlette and FastAPI use `app.add_route`, not a
-`Mount`: Starlette answers a mount's bare path with a redirect to its slashed
-form, the browser SDK posts to the bare one, and the proxy does not answer the
-slashed one. The [framework guides](#framework-guides) show each in full.
-
 Then point the browser SDK at the same path:
 
 ```ts
 const fingerly = await load({ apiKey: 'fly_pk_…', endpoints: '/k7x2qm4a' })
 ```
 
+### Which adapter to serve
+
+| Your framework | Serve | Notes |
+| --- | --- | --- |
+| FastAPI, Starlette, Django's ASGI stack, Quart, Litestar | `proxy.asgi` | Under Starlette and FastAPI use `app.add_route`, not a `Mount`: Starlette answers a mount's bare path with a redirect to its slashed form, the browser SDK posts to the bare one, and the proxy does not answer the slashed one. |
+| Flask, Django's WSGI stack, Pyramid | `proxy.wsgi` | |
+
+The [framework guides](#framework-guides) show each in full.
+
+### The path
+
+`path` is the path the dashboard issued, within your application. With it set, the proxy answers that one path, exactly, and anything else gets `404`, including anything under it, a trailing slash, another letter case, a dot segment or a percent-encoded spelling of the same path. It excludes anything a sub-URI deployment adds, and a path the mount has already stripped works too, so the same configuration serves an app at the root and one served from `/shop`. It is optional: leave it out and the proxy answers whatever your framework routes to it, which is safe only where the framework routes that one path and nothing else. There is no default path. Use the one the dashboard issued rather than inventing one: blockers look for words such as `fingerprint`, `tracking` and `fingerly`.
+
 ### What the proxy does
 
-The browser SDK posts both of its calls, the identification and the report
-that follows it, to that one path. The proxy forwards each, as it is, to
-Fingerly's one ingest URL, `https://api.fingerly.io/api/v1/ingest`, and to
-nothing else. A path other than the configured one gets `404`, and any method
-but `POST` gets `405`. Event reads need a secret key and stay unreachable from
-a browser by construction.
+The browser SDK posts both of its calls, the identification and the report that follows it, to that one path. The proxy forwards each, as it is, to Fingerly's one ingest URL, `https://api.fingerly.io/api/v1/ingest`, and to nothing else. A path other than the configured one gets `404`, and any method but `POST` gets `405`. Event reads need a secret key and stay unreachable from a browser by construction.
 
-The browser must present a public key from the same environment as the proxy
-key, or the request gets `401`. Bodies over 1 MiB get `413`, enforced
-while streaming rather than after buffering, and under WSGI a body the server
-cannot read, such as broken chunked framing, gets `400`. Responses are marked
-`no-store`.
+| Situation | Answer |
+| --- | --- |
+| Path other than the configured one | `404` |
+| Method other than `POST` | `405` |
+| Public key from a different environment than the proxy key | `401` |
+| Body over 1 MiB (enforced while streaming rather than after buffering) | `413` |
+| WSGI body the server cannot read, such as broken chunked framing | `400` |
+| Fingerly cannot be reached in time | `504 Gateway timeout` |
+| Any other upstream failure: a refused connection, a malformed or truncated response, or one over 4 MiB | `502 Bad gateway` |
+| `client_ip` callback returns no valid address | `500` with the one line `The client IP callback returned no valid address` |
 
-Only the content type, the visitor metadata Fingerly needs, and an
-`idempotency-key` are forwarded. Customer cookies and authorization headers are
-never passed on. The proxy reports itself upstream as `python/<version>` in
-`x-fingerly-proxy-version`, which the dashboard shows per proxy, and sends
-`fingerly-python/<version>` as its user agent.
+The browser must present a public key from the same environment as the proxy key, or the request gets `401`. Responses are marked `no-store`. The `504` and `502` answers are short plain text marked `no-store`, and each writes one line, with no stack trace, to the `fingerly.proxy` logger.
 
-When Fingerly cannot be reached in time the proxy answers `504 Gateway
-timeout`, and on any other upstream failure, such as a refused connection, a
-malformed or truncated response or one over 4 MiB, `502 Bad gateway`. Both are
-short plain text marked `no-store`, and each writes one line, with no stack
-trace, to the `fingerly.proxy` logger.
+Only the content type, the visitor metadata Fingerly needs, and an `idempotency-key` are forwarded. Customer cookies and authorization headers are never passed on. The proxy reports itself upstream as `python/<version>` in `x-fingerly-proxy-version`, which the dashboard shows per proxy, and sends `fingerly-python/<version>` as its user agent.
 
-Back to the browser it relays only `content-type`, `x-request-id`,
-`ratelimit-limit`, `ratelimit-remaining` and `retry-after`, plus its own
-`cache-control: no-store` and a `content-length` for the decoded body. A
-content blocker can match a response header by name, so an allowlist is what
-keeps anything naming Fingerly off the page.
+Back to the browser it relays only `content-type`, `x-request-id`, `ratelimit-limit`, `ratelimit-remaining` and `retry-after`, plus its own `cache-control: no-store` and a `content-length` for the decoded body. A content blocker can match a response header by name, so an allowlist is what keeps anything naming Fingerly off the page.
 
-> **`client_ip` is the one thing you must get right.** Resolve it from a header
-> your own infrastructure sets, such as your load balancer's or CDN's, and fall
-> back to `peer_host`, the socket peer. Trust that header only when traffic can
-> reach your app solely through that CDN or load balancer; otherwise a visitor
-> can send it themselves. Never read the left-most `X-Forwarded-For` value: the
-> visitor writes it. The callback is synchronous, because it is called under
-> both standards.
+### Resolving the client IP
 
-The callback must return exactly one IPv4 or IPv6 address, such as
-`203.0.113.7` or `2001:db8::1`. Anything else, including `None`, an empty
-string, a list, an address with a port, or an exception, is treated as a
-configuration mistake: the request is not forwarded, the visitor gets `500`
-with the one line `The client IP callback returned no valid address`, and the
-`fingerly.proxy` logger reports it once per process.
+> **`client_ip` is the one thing you must get right.** Resolve it from a header your own infrastructure sets, such as your load balancer's or CDN's, and fall back to `peer_host`, the socket peer. Trust that header only when traffic can reach your app solely through that CDN or load balancer; otherwise a visitor can send it themselves. Never read the left-most `X-Forwarded-For` value: the visitor writes it. The callback is synchronous, because it is called under both standards.
 
-`ProxyRequest` gives the callback `headers` (case-insensitive), `path`,
-`method`, `peer_host`, `mount` and `raw_path`. `peer_host` is the socket peer,
-which is your load balancer rather than the visitor whenever one sits in front
-of you.
+The callback must return exactly one IPv4 or IPv6 address, such as `203.0.113.7` or `2001:db8::1`. Anything else, including `None`, an empty string, a list, an address with a port, or an exception, is treated as a configuration mistake: the request is not forwarded, the visitor gets `500` with the one line `The client IP callback returned no valid address`, and the `fingerly.proxy` logger reports it once per process.
 
-### A note on mount paths
+`ProxyRequest` gives the callback `headers` (case-insensitive), `path`, `method`, `peer_host`, `mount` and `raw_path`. `peer_host` is the socket peer, which is your load balancer rather than the visitor whenever one sits in front of you.
 
-Both adapters match the path as the mounted application sees it: `PATH_INFO`
-under WSGI, and under ASGI the `path` with `root_path` removed when it is still
-carrying it. Mounted at its own path, the proxy finds that path in the mount
-instead, `SCRIPT_NAME` or `root_path`, with nothing after it.
+<details>
+<summary>A note on mount paths</summary>
 
-That last part needs care. ASGI servers disagree about what `path` holds under
-a mount: Starlette 0.47 and newer leave it whole and report the prefix
-separately in `root_path`, while older versions and some routers strip the
-prefix off it. Both are permitted by the spec, so the proxy detects which one
-it was given rather than assuming.
+Both adapters match the path as the mounted application sees it: `PATH_INFO` under WSGI, and under ASGI the `path` with `root_path` removed when it is still carrying it. Mounted at its own path, the proxy finds that path in the mount instead, `SCRIPT_NAME` or `root_path`, with nothing after it.
 
-Taking the application-relative path rather than the whole one is what makes a
-sub-URI deployment work. There, `root_path` or `SCRIPT_NAME` carries a prefix
-that belongs to the deployment and that your `path` knows nothing about, so a
-proxy matching on the whole path would refuse every request. It is the same
-rule Rack's `PATH_INFO` and ASP.NET Core's `Request.Path` already follow.
+That last part needs care. ASGI servers disagree about what `path` holds under a mount: Starlette 0.47 and newer leave it whole and report the prefix separately in `root_path`, while older versions and some routers strip the prefix off it. Both are permitted by the spec, so the proxy detects which one it was given rather than assuming.
 
-`tests/test_frameworks.py` drives real Starlette and Flask apps, mounted plainly
-and again under a sub-URI, to keep all of it that way.
+Taking the application-relative path rather than the whole one is what makes a sub-URI deployment work. There, `root_path` or `SCRIPT_NAME` carries a prefix that belongs to the deployment and that your `path` knows nothing about, so a proxy matching on the whole path would refuse every request. It is the same rule Rack's `PATH_INFO` and ASP.NET Core's `Request.Path` already follow.
 
-### Closing
+`tests/test_frameworks.py` drives real Starlette and Flask apps, mounted plainly and again under a sub-URI, to keep all of it that way.
 
-The proxy opens its upstream connections on first use, one pool per standard.
-Close whichever you used when your app shuts down: `proxy.close()` for WSGI,
-`await proxy.aclose()` for ASGI. A WSGI process can simply exit.
+</details>
+
+### Closing the proxy
+
+The proxy opens its upstream connections on first use, one pool per standard. Close whichever you used when your app shuts down: `proxy.close()` for WSGI, `await proxy.aclose()` for ASGI. A WSGI process can simply exit.
 
 ## Framework guides
 
-Each guide is a complete app. Replace `/k7x2qm4a` with the path the dashboard
-issued, and set `FINGERLY_SECRET_KEY` and `FINGERLY_PROXY_KEY`. The browser
-posts identifications to the proxy path and sends the `requestId` it gets back
-to `/verify/<request_id>`, where your server reads the event with its secret
-key.
+Each guide is a complete app. Replace `/k7x2qm4a` with the path the dashboard issued, and set `FINGERLY_SECRET_KEY` and `FINGERLY_PROXY_KEY`. The browser posts identifications to the proxy path and sends the `requestId` it gets back to `/verify/<request_id>`, where your server reads the event with its secret key.
+
+| Framework | Client | Proxy mounted with |
+| --- | --- | --- |
+| [FastAPI](#fastapi) | `AsyncFingerly`, one per worker, built in the lifespan | `app.add_route` with `proxy.asgi` |
+| [Django](#django) | `Fingerly`, one per process | A wrapper in `wsgi.py` or `asgi.py`, before URL routing |
+| [Flask](#flask) | `Fingerly`, one per process | `DispatcherMiddleware` with `proxy.wsgi` |
 
 ### FastAPI
+
+<details>
+<summary>Complete app</summary>
 
 ```python
 # main.py; run with: uvicorn main:app
@@ -338,13 +316,16 @@ async def verify(request_id: str, request: Request):
     return {"visitor_id": event.visitor_id, "suspect_score": event.suspect_score}
 ```
 
-The same works under `uvicorn --workers 4` or gunicorn's uvicorn worker: each
-worker runs the lifespan and gets its own client and pool.
+</details>
+
+The same works under `uvicorn --workers 4` or gunicorn's uvicorn worker: each worker runs the lifespan and gets its own client and pool.
 
 ### Django
 
-Django has no `add_route`, so put the proxy in front of Django in `wsgi.py`
-or `asgi.py`, before any URL routing. In a project named `mysite`:
+Django has no `add_route`, so put the proxy in front of Django in `wsgi.py` or `asgi.py`, before any URL routing. In a project named `mysite`:
+
+<details>
+<summary>Complete app (identification.py, wsgi.py, asgi.py, views.py, urls.py)</summary>
 
 ```python
 # mysite/identification.py
@@ -439,10 +420,14 @@ from mysite import views
 urlpatterns = [path("verify/<str:request_id>", views.verify)]
 ```
 
-`verify` is a plain view, so Django runs it in a thread under ASGI too. In an
-`async def` view use `AsyncFingerly` instead, built once per process.
+</details>
+
+`verify` is a plain view, so Django runs it in a thread under ASGI too. In an `async def` view use `AsyncFingerly` instead, built once per process.
 
 ### Flask
+
+<details>
+<summary>Complete app</summary>
 
 ```python
 # app.py; run with: gunicorn app:app, or flask --app app run
@@ -483,33 +468,23 @@ def verify(request_id):
     return {"visitor_id": event.visitor_id, "suspect_score": event.suspect_score}
 ```
 
-A `DispatcherMiddleware` mount answers everything under its path too, which is
-what `path` narrows back down to the one path.
+</details>
+
+A `DispatcherMiddleware` mount answers everything under its path too, which is what `path` narrows back down to the one path.
 
 ## Timeouts
 
-`timeout` is one deadline over the whole request: connecting, sending, the
-response headers and the body. An API that answers a byte at a time cannot
-stretch it. The default is 10 seconds for the clients and 5 for the proxy.
-Response bodies over 4 MiB are refused rather than buffered: the clients raise
-`FingerlyAPIError` with code `response_too_large`.
+`timeout` is one deadline over the whole request: connecting, sending, the response headers and the body. An API that answers a byte at a time cannot stretch it. The default is 10 seconds for the clients and 5 for the proxy. Response bodies over 4 MiB are refused rather than buffered: the clients raise `FingerlyAPIError` with code `response_too_large`.
 
-Under a thread or process server (gunicorn sync or gthread workers, Django or
-Flask under WSGI), size the pool for the slow case, not the average one: while
-Fingerly is slow, every proxied request holds its thread for the whole
-`timeout`. At 100 proxied requests a second with 1% of them running into a 5
-second timeout, that is 5 threads busy on average, before any fast request is
-served. Run more threads than that, lower `timeout` for the proxy, or serve
-through `proxy.asgi`, where a waiting request holds no thread.
+Under a thread or process server (gunicorn sync or gthread workers, Django or Flask under WSGI), size the pool for the slow case, not the average one: while Fingerly is slow, every proxied request holds its thread for the whole `timeout`. At 100 proxied requests a second with 1% of them running into a 5 second timeout, that is 5 threads busy on average, before any fast request is served. Run more threads than that, lower `timeout` for the proxy, or serve through `proxy.asgi`, where a waiting request holds no thread.
 
 ## Connections
 
-Each client, and each proxy handler, keeps its connections open between
-requests and shares them across threads or tasks. Up to 256 concurrent requests
-per process reuse connections rather than opening one each; pass
-`limits=httpx.Limits(max_connections=…)` to change that. Connections are
-replaced every five minutes, so a changed DNS answer is picked up. Redirects
-are never followed and no cookies are kept.
+Each client, and each proxy handler, keeps its connections open between requests and shares them across threads or tasks. Up to 256 concurrent requests per process reuse connections rather than opening one each; pass `limits=httpx.Limits(max_connections=…)` to change that. Connections are replaced every five minutes, so a changed DNS answer is picked up. Redirects are never followed and no cookies are kept.
+
+## API version
+
+Pass `api_version` to select a route version, for example `v1` (the default) or `v2`. The server must support the chosen version. The version applies to every API request; it is separate from the endpoint origin. On the proxy it selects the ingest URL, `/api/v2/ingest`, and nothing on your own site.
 
 ## Development and release preparation
 
@@ -523,34 +498,33 @@ uv run python scripts/sync_contract.py --check
 uv build                                    # wheel and sdist
 ```
 
-`uv sync` reads the `dev` dependency group, so there is nothing else to install.
-`.python-version` pins the development interpreter to 3.9, the oldest supported
-runtime, so the floor is exercised locally rather than only in CI. `uv.lock` is
-committed; CI installs with `uv sync --frozen`.
+`uv sync` reads the `dev` dependency group, so there is nothing else to install. `.python-version` pins the development interpreter to 3.9, the oldest supported runtime, so the floor is exercised locally rather than only in CI. `uv.lock` is committed; CI installs with `uv sync --frozen`.
 
-The vendored synthetic contract snapshot makes tests independent of sibling
-repositories. To update it from the integration workspace, set
-`FINGERLY_CONTRACT_DIR` to its `contract` directory and run
-`python scripts/sync_contract.py`. Checks verify the recorded hashes. Never put
-production secrets in fixtures.
+The vendored synthetic contract snapshot makes tests independent of sibling repositories. To update it from the integration workspace, set `FINGERLY_CONTRACT_DIR` to its `contract` directory and run `python scripts/sync_contract.py`. Checks verify the recorded hashes. Never put production secrets in fixtures.
 
-## Source structure
+<details>
+<summary>Source structure</summary>
 
-`_client.py` holds both clients and their event reads. `_http.py` is the
-connection pool both clients and the proxy send through, with its deadline and
-body cap. `_transport.py` builds requests and interprets responses, so the two clients share one definition of
-what a request is and what a failure means. `_models.py` owns `Event`,
-`EventPage` and their parsing. `_webhooks.py` verifies signatures. `_proxy.py`
-owns every proxy decision, with `_asgi.py` and `_wsgi.py` as thin adapters that
-only read a request and write a response, so the two standards cannot drift
-apart. `_config.py` validates every caller-supplied option: keys, origins, API
-versions and durations, all before any network access. `_errors.py` holds the
-exception hierarchy. `_version.py` holds the version everything else reads.
-`__init__.py` only exposes the public API.
+`_client.py` holds both clients and their event reads. `_http.py` is the connection pool both clients and the proxy send through, with its deadline and body cap. `_transport.py` builds requests and interprets responses, so the two clients share one definition of what a request is and what a failure means. `_models.py` owns `Event`, `EventPage` and their parsing. `_webhooks.py` verifies signatures. `_proxy.py` owns every proxy decision, with `_asgi.py` and `_wsgi.py` as thin adapters that only read a request and write a response, so the two standards cannot drift apart. `_config.py` validates every caller-supplied option: keys, origins, API versions and durations, all before any network access. `_errors.py` holds the exception hierarchy. `_version.py` holds the version everything else reads. `__init__.py` only exposes the public API.
 
-### API version
+</details>
 
-Pass `api_version` to select a route version, for example `v1` (the default) or
-`v2`. The server must support the chosen version. The version applies to every
-API request; it is separate from the endpoint origin. On the proxy it selects
-the ingest URL, `/api/v2/ingest`, and nothing on your own site.
+## Requirements
+
+- Python 3.9 or newer.
+- One runtime dependency, `httpx` (`>=0.27,<1`).
+
+## Documentation
+
+- [Python SDK guide](https://docs.fingerly.io/docs/sdks/python)
+- [Reading events](https://docs.fingerly.io/docs/reading-events) and [Webhooks](https://docs.fingerly.io/docs/webhooks)
+- [Proxy integrations](https://docs.fingerly.io/docs/proxy-integrations)
+- [API reference](https://docs.fingerly.io/reference/overview)
+
+## Help
+
+Open an issue on this repository, or write to [support@fingerly.io](mailto:support@fingerly.io). Security issues: [security@fingerly.io](mailto:security@fingerly.io).
+
+## Licence
+
+Apache-2.0. See [LICENSE](https://github.com/fingerly-io/sdk-python/blob/main/LICENSE).
