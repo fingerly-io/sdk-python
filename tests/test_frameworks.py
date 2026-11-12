@@ -108,7 +108,7 @@ class TestStarlette:
         assert str(forwarded.url) == INGEST
         assert forwarded.headers["x-fingerly-client-ip"] == "203.0.113.5"
         assert forwarded.headers["x-fingerly-proxy-key"] == PROXY_KEY
-        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.1.0"
+        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.2.0"
         assert "cookie" not in forwarded.headers
 
     def test_a_mount_at_the_issued_path_answers_nothing(self) -> None:
@@ -195,7 +195,7 @@ class TestFlask:
         assert [str(request.url) for request in upstream.requests] == [INGEST] * 2
         forwarded = upstream.requests[0]
         assert forwarded.headers["x-fingerly-client-ip"] == "203.0.113.5"
-        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.1.0"
+        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.2.0"
         assert "cookie" not in forwarded.headers
 
     def test_forwards_from_a_deployment_under_a_sub_uri(self) -> None:

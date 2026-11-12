@@ -1,6 +1,6 @@
 # Changelog
 
-### Unreleased
+## 0.2.0
 
 - `Event.project_id` is the Fingerly project an event belongs to, on single
   reads and list rows; `None` when the server does not send it. Webhook `data`
