@@ -42,10 +42,16 @@ class Event:
     """A stored identification event.
 
     ``suspect_score`` is ``None`` when the request was not scored, which must
-    not be read as zero. ``document`` and ``deferred_signals`` are archived
-    detail whose contents are deliberately opaque, not a public contract.
+    not be read as zero. ``ip_network`` is the network the request came from
+    (an IPv4 /24 or an IPv6 /40, such as ``203.0.113.0/24``); the API never
+    returns the address. ``document`` is an allow-listed view of the archived
+    request (schema, request id, time, SDK, network, IP classification and
+    city-level location, risk, attestation and velocity), with no raw signals,
+    user agent or address; its contents are not a public contract.
 
     Attributes:
+        project_id: The Fingerly project the event belongs to, as a UUID
+            string. ``None`` when an older server did not send it.
         raw: The decoded response body. Fields this SDK does not declare are
             readable as attributes through it.
     """
@@ -58,13 +64,14 @@ class Event:
     platform: str
     sdk_platform: str
     sdk_version: str
-    ip_address: str
     has_document: bool
     triggers: Sequence[EventTrigger]
     suspect_score: Optional[int] = None
     suspect_level: Optional[str] = None
     origin: Optional[str] = None
     tag: Optional[str] = None
+    project_id: Optional[str] = None
+    ip_network: Optional[str] = None
     country_code: Optional[str] = None
     country_name: Optional[str] = None
     asn: Optional[str] = None
@@ -76,7 +83,6 @@ class Event:
     device_kind: Optional[str] = None
     visitor_kind: Optional[str] = None
     document: Optional[Mapping[str, Any]] = None
-    deferred_signals: Optional[Mapping[str, Any]] = None
     raw: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     def __getattr__(self, name: str) -> Any:
@@ -133,13 +139,14 @@ def parse_event(payload: Mapping[str, Any]) -> Event:
         platform=_require(payload, "platform", str),
         sdk_platform=_require(payload, "sdk_platform", str),
         sdk_version=_require(payload, "sdk_version", str),
-        ip_address=_require(payload, "ip_address", str),
         has_document=bool(payload.get("has_document", False)),
         triggers=[_parse_trigger(row) for row in payload.get("triggers") or ()],
         suspect_score=payload.get("suspect_score"),
         suspect_level=payload.get("suspect_level"),
         origin=payload.get("origin"),
         tag=payload.get("tag"),
+        project_id=payload.get("project_id"),
+        ip_network=payload.get("ip_network") or None,
         country_code=payload.get("country_code"),
         country_name=payload.get("country_name"),
         asn=payload.get("asn"),
@@ -151,7 +158,6 @@ def parse_event(payload: Mapping[str, Any]) -> Event:
         device_kind=payload.get("device_kind"),
         visitor_kind=payload.get("visitor_kind"),
         document=payload.get("document"),
-        deferred_signals=payload.get("deferred_signals"),
         raw=payload,
     )
 
