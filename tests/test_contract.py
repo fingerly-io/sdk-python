@@ -155,8 +155,11 @@ class TestV3Contract:
 
         v3_signals = [
             "attestation_failed",
+            "attestation_downgrade",
             "device_inconsistent",
             "report_incomplete",
+            "probe_errors",
+            "fetch_metadata_missing",
             "tampering",
             "custom_root_ca",
             "secondary_user_profile",
@@ -218,3 +221,49 @@ class TestV3Contract:
         assert isinstance(doc.attestation, Attestation)
         assert doc.attestation.status == "verified"
         assert doc.attestation.platform == "android"
+        assert doc.attestation.attest_skipped is None
+        assert doc.attestation.downgrade is False
+
+    def test_reads_attest_skipped_and_downgrade(self) -> None:
+        payload: dict[str, Any] = {
+            "request_id": "0199a963-e400-7000-8000-000000000098",
+            "project_id": "0199a963-e400-7000-8000-0000000000a1",
+            "visitor_id": "",
+            "occurred_at": "2026-09-17T12:00:00Z",
+            "state": "enriched",
+            "environment": "development",
+            "platform": "ios",
+            "sdk_platform": "ios",
+            "sdk_version": "0.3.0",
+            "suspect_score": 30,
+            "suspect_level": "high",
+            "triggers": [
+                {"signal": "attestation_failed", "weight": 30, "confidence": "high"}
+            ],
+            "has_document": True,
+            "document": {
+                "schema": 1,
+                "request_id": "0199a963-e400-7000-8000-000000000098",
+                "occurred_at": "2026-09-17T12:00:00Z",
+                "sdk": {"platform": "ios", "version": "0.3.0"},
+                "attestation": {
+                    "state": "not_attested",
+                    "platform": "ios",
+                    "status": "absent",
+                    "attest_skipped": "timeout",
+                    "downgrade": True,
+                },
+            },
+        }
+
+        with Fingerly(
+            secret_key=SECRET_KEY,
+            transport=Recorder(json_response(payload)).transport(),
+        ) as client:
+            event = client.events.get(payload["request_id"])
+
+        doc = event.parse_document()
+        assert isinstance(doc, EventDocument)
+        assert isinstance(doc.attestation, Attestation)
+        assert doc.attestation.attest_skipped == "timeout"
+        assert doc.attestation.downgrade is True

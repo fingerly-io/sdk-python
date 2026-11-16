@@ -78,6 +78,7 @@ SIGNAL_NAMES: tuple[str, ...] = (
     "bot",
     "automation",
     "bad_bot",
+    "fetch_metadata_missing",
     "high_activity",
     "incognito_mode",
     "incognito",
@@ -86,8 +87,10 @@ SIGNAL_NAMES: tuple[str, ...] = (
     "active_call",
     "attestation_missing",
     "attestation_failed",
+    "attestation_downgrade",
     "device_inconsistent",
     "report_incomplete",
+    "probe_errors",
     "custom_root_ca",
     "secondary_user_profile",
 )
@@ -117,6 +120,12 @@ class Attestation:
         state: ``attested``, ``not_attested`` or ``failed``.
         status: ``verified``, ``indeterminate``, ``invalid``, ``absent`` or
             ``unconfigured``.
+        attest_skipped: Native only: the app's own reason for sending no
+            attestation, such as ``not_offered``, ``unsupported`` or
+            ``timeout``. Diagnostic only; it never lowers the score.
+        downgrade: Native only: an unproven or rejected report named an
+            install an attested device owns, so it was answered
+            unidentifiable.
     """
 
     state: str
@@ -132,6 +141,8 @@ class Attestation:
     revocation_checked: bool = False
     package_bound: bool = False
     signer_bound: bool = False
+    attest_skipped: Optional[str] = None
+    downgrade: bool = False
     mode: Optional[str] = None
     app_id: Optional[str] = None
     environment: Optional[str] = None
@@ -384,6 +395,8 @@ def _parse_attestation(payload: Mapping[str, Any]) -> Attestation:
         revocation_checked=bool(payload.get("revocation_checked", False)),
         package_bound=bool(payload.get("package_bound", False)),
         signer_bound=bool(payload.get("signer_bound", False)),
+        attest_skipped=payload.get("attest_skipped"),
+        downgrade=bool(payload.get("downgrade", False)),
         mode=payload.get("mode"),
         app_id=payload.get("app_id"),
         environment=payload.get("environment"),

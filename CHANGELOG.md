@@ -6,9 +6,11 @@
   deferred supplement schemas and routes, and added `Event.reason`,
   `Event.url_host`, `Event.url_path`, `Event.identifiable`,
   `Event.parse_document()`, `EventDocument`, `Attestation`, and `SIGNAL_NAMES`
-  covering all v3 signals (`attestation_failed`, `device_inconsistent`,
-  `report_incomplete`, `tampering`, `custom_root_ca`,
-  `secondary_user_profile`).
+  covering all v3 signals (`attestation_failed`, `attestation_downgrade`,
+  `device_inconsistent`, `report_incomplete`, `probe_errors`,
+  `fetch_metadata_missing`, `tampering`, `custom_root_ca`,
+  `secondary_user_profile`), with `attest_skipped` and `downgrade` on
+  `Attestation`.
 - Updated `FingerlyProxy` (ASGI and WSGI) to enforce the single-path
   `proxy.md` relay contract: sanitize-and-restore validation of
   `x-fingerly-sdk-platform`, rejection with HTTP `400` (`missing_origin`) when
