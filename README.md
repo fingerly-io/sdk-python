@@ -40,9 +40,14 @@ In a web app, build the client once and reuse it: see
 
 Event reads require `fly_sk_{production|staging|development}_…` keys. Requests
 go to `https://api.fingerly.io`; `endpoint` overrides that for a local API.
-Public, proxy, management, malformed and unsupported keys are rejected before
-network access. Requests do not follow redirects. `get` and `list` each perform
-one request and never retry.
+`endpoint` takes a scheme, a host and an optional port and nothing else: a
+path, query, fragment, credentials, space or control character is refused when
+the client is built. It must be `https`. Plain `http` is accepted only for
+`127.0.0.1`, `localhost` or `[::1]`, and only with
+`allow_insecure_loopback=True`, which is meant for local development and
+tests. Public, proxy, management, malformed and unsupported keys are rejected
+before network access. Requests do not follow redirects. `get` and `list` each
+perform one request and never retry.
 
 `FingerlyAPIError` provides `status`, and optional `code`, `details`,
 `request_id` and `retry_after`, the seconds a `429`, a `503` or a

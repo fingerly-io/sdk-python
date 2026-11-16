@@ -16,8 +16,8 @@ from ._config import (
     DEFAULT_ENDPOINT,
     Secret,
     no_cookies,
+    normalize_api_origin,
     normalize_api_version,
-    normalize_endpoint,
     parse_key,
     positive_seconds,
 )
@@ -47,16 +47,22 @@ class _BaseFingerly:
         endpoint: Optional[str] = None,
         timeout: float = DEFAULT_TIMEOUT,
         api_version: str = "v1",
+        allow_insecure_loopback: bool = False,
     ) -> None:
         """Validates every option before any client is built.
 
         Args:
             secret_key: A server-only key, ``fly_sk_{environment}_…``. Its
                 prefix names the environment read.
-            endpoint: Overrides the Fingerly API origin, for a local API.
+            endpoint: Overrides the Fingerly API origin, for a local API. Only
+                a scheme, a host and an optional port, such as
+                ``https://api.example.com:8443``; ``https`` is required.
             timeout: One deadline, in seconds, over the whole request:
                 connecting, sending, the response headers and the body.
             api_version: API route version; the server must support it.
+            allow_insecure_loopback: For local development and tests only:
+                lets ``endpoint`` be plain ``http`` on 127.0.0.1, localhost or
+                [::1]. Every other ``http`` endpoint is refused either way.
 
         Raises:
             TypeError: If any option is invalid. Nothing is sent until then.
@@ -64,7 +70,11 @@ class _BaseFingerly:
         # Validate the key even when an endpoint is given, so a public, proxy
         # or management key can never reach an API that would accept it.
         parse_key(secret_key, "sk")
-        origin = DEFAULT_ENDPOINT if endpoint is None else normalize_endpoint(endpoint)
+        origin = normalize_api_origin(
+            DEFAULT_ENDPOINT if endpoint is None else endpoint,
+            allow_insecure_loopback,
+            "endpoint",
+        )
         self._secret_key = Secret(secret_key)
         self._base_url = f"{origin}/api/{normalize_api_version(api_version)}"
         self._timeout = positive_seconds(timeout, "timeout")
@@ -192,6 +202,7 @@ class Fingerly(_BaseFingerly):
         api_version: str = "v1",
         transport: Optional[httpx.BaseTransport] = None,
         limits: Optional[httpx.Limits] = None,
+        allow_insecure_loopback: bool = False,
     ) -> None:
         """See :class:`_BaseFingerly` for the shared arguments.
 
@@ -201,7 +212,9 @@ class Fingerly(_BaseFingerly):
             limits: Connections this client may hold across its pools. The
                 default lets 256 concurrent reads reuse connections.
         """
-        super().__init__(secret_key, endpoint, timeout, api_version)
+        super().__init__(
+            secret_key, endpoint, timeout, api_version, allow_insecure_loopback
+        )
 
         def build(pool_transport: Optional[httpx.BaseTransport]) -> httpx.Client:
             return httpx.Client(
@@ -273,6 +286,7 @@ class AsyncFingerly(_BaseFingerly):
         api_version: str = "v1",
         transport: Optional[httpx.AsyncBaseTransport] = None,
         limits: Optional[httpx.Limits] = None,
+        allow_insecure_loopback: bool = False,
     ) -> None:
         """See :class:`_BaseFingerly` for the shared arguments.
 
@@ -282,7 +296,9 @@ class AsyncFingerly(_BaseFingerly):
             limits: Connections this client may hold across its pools. The
                 default lets 256 concurrent reads reuse connections.
         """
-        super().__init__(secret_key, endpoint, timeout, api_version)
+        super().__init__(
+            secret_key, endpoint, timeout, api_version, allow_insecure_loopback
+        )
 
         def build(
             pool_transport: Optional[httpx.AsyncBaseTransport],
