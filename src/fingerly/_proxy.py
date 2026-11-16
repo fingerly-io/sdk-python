@@ -43,6 +43,7 @@ from ._config import (
     KeyScope,
     Secret,
     no_cookies,
+    normalize_api_origin,
     normalize_api_version,
     normalize_endpoint,
     parse_key,
@@ -255,6 +256,7 @@ class FingerlyProxy:
         transport: Optional[httpx.BaseTransport] = None,
         async_transport: Optional[httpx.AsyncBaseTransport] = None,
         limits: Optional[httpx.Limits] = None,
+        allow_insecure_loopback: bool = False,
     ) -> None:
         """Validates every option before either handler exists.
 
@@ -273,6 +275,10 @@ class FingerlyProxy:
                 when the framework already routes only that path here.
             api_version: Version of the upstream ingest URL.
             upstream: Overrides the API origin implied by the key.
+                ``https`` is required.
+            allow_insecure_loopback: For local development and tests only:
+                lets ``upstream`` be plain ``http`` on 127.0.0.1, localhost or
+                [::1]. Every other ``http`` upstream is refused either way.
             max_body_bytes: Larger request bodies are refused with 413.
             timeout: One deadline, in seconds, over the whole upstream
                 exchange: connecting, sending, the response headers and the
@@ -300,7 +306,11 @@ class FingerlyProxy:
         )
         self._key = Secret(raw_key)
         self._upstream_url = (
-            normalize_endpoint(upstream if upstream is not None else DEFAULT_ENDPOINT)
+            normalize_api_origin(
+                upstream if upstream is not None else DEFAULT_ENDPOINT,
+                allow_insecure_loopback,
+                "upstream",
+            )
             + f"/api/{normalize_api_version(api_version)}/ingest"
         )
         self._path = None if path is None else _normalize_path(path)
@@ -479,11 +489,14 @@ class FingerlyProxy:
         }
         if self._uses_proxy_key:
             headers["x-fingerly-proxy-key"] = self._key.reveal()
+        # One channel only: a browser Origin wins, as it does when the same
+        # request is sent to the API directly. The API refuses a proxied
+        # request that carries both.
         origin = request.headers.get("origin", "").strip()
+        raw_platform = request.headers.get("x-fingerly-sdk-platform", "")
         if origin:
             headers["x-fingerly-origin"] = origin
-        raw_platform = request.headers.get("x-fingerly-sdk-platform", "")
-        if raw_platform in VALID_SDK_PLATFORMS:
+        elif raw_platform in VALID_SDK_PLATFORMS:
             headers["x-fingerly-sdk-platform"] = raw_platform
         host = request.headers.get("host", "").strip()
         if host:

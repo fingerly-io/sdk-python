@@ -284,7 +284,7 @@ class TestEndpointsRefusedAtConstruction:
     def test_fails_before_any_request(self, endpoint: str) -> None:
         with pytest.raises(TypeError, match="endpoint must be"):
             Fingerly(secret_key=SECRET_KEY, endpoint=endpoint)
-        with pytest.raises(TypeError, match="endpoint must be"):
+        with pytest.raises(TypeError, match="upstream must"):
             FingerlyProxy(
                 proxy_key=PROXY_KEY, upstream=endpoint, client_ip=lambda _: ""
             )

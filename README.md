@@ -223,6 +223,21 @@ and any method other than `POST` (plus `OPTIONS` when `allowed_origins` is
 configured) gets `405`. Event reads need a secret key and stay unreachable from
 a browser by construction.
 
+`upstream` replaces the API origin for testing against a local API. It must
+be `https`. Plain `http` is accepted only for `127.0.0.1`, `localhost` or
+`[::1]`, and only with `allow_insecure_loopback=True`, which is meant for local
+development and tests:
+
+```python
+proxy = FingerlyProxy(
+    proxy_key=os.environ["FINGERLY_PROXY_KEY"],
+    path="/k7x2qm4a",
+    client_ip=lambda request: request.peer_host,
+    upstream="http://127.0.0.1:8080",
+    allow_insecure_loopback=True,
+)
+```
+
 The caller must present a public key from the same environment as the proxy
 key, or the request gets `401`. Incoming headers follow the sanitize-and-restore
 sequence: all incoming `x-fingerly-*`, `cookie` and `authorization` headers are
@@ -233,9 +248,12 @@ lowercase native or bridge platform (`ios`, `android`, `react-native`,
 `kotlin-multiplatform`). Requests carrying neither `Origin` nor a validated
 `x-fingerly-sdk-platform` are rejected locally with `400` (`missing_origin`),
 and `x-fingerly-origin` is never synthesized from `Host`, `Referer` or the
-request URL. Bodies over 1 MiB get `413`, enforced while streaming rather than
-after buffering, and under WSGI a body the server cannot read, such as broken
-chunked framing, gets `400`. Responses are marked `no-store`.
+request URL. Exactly one channel goes upstream: a request with an `Origin` is
+forwarded as a browser call with `x-fingerly-origin` and without the platform
+header, as the API treats the same request sent to it directly. Bodies over
+1 MiB get `413`, enforced while streaming rather than after buffering, and
+under WSGI a body the server cannot read, such as broken chunked framing, gets
+`400`. Responses are marked `no-store`.
 
 Alongside verified proxy metadata (`x-fingerly-host` included), only
 `content-type`, `x-api-key`, `user-agent`, `idempotency-key`, `sec-fetch-*` and

@@ -122,6 +122,48 @@ def normalize_endpoint(value: str) -> str:
     return value.rstrip("/")
 
 
+#: The only hosts a plain HTTP API origin may name, and only when
+#: ``allow_insecure_loopback`` is set.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def normalize_api_origin(
+    value: object, allow_insecure_loopback: bool, name: str
+) -> str:
+    """Validates an API origin option and requires ``https``.
+
+    Plain ``http`` is accepted only for 127.0.0.1, localhost or [::1], and only
+    when ``allow_insecure_loopback`` is set, because a key travels with every
+    request. The value is never echoed in the error.
+
+    Args:
+        value: The option as the caller gave it.
+        allow_insecure_loopback: Whether plain HTTP on a loopback host is
+            allowed, for local development and tests.
+        name: The option's name, for the error.
+
+    Raises:
+        TypeError: If the value is not such an origin.
+    """
+    if not isinstance(allow_insecure_loopback, bool):
+        raise TypeError("allow_insecure_loopback must be a bool")
+    try:
+        origin = normalize_endpoint(value)  # type: ignore[arg-type]
+    except TypeError:
+        raise TypeError(
+            f"{name} must be an HTTP(S) URL without credentials, query, or fragment"
+        ) from None
+    parts = urlsplit(origin)
+    if parts.scheme == "http" and not (
+        allow_insecure_loopback and (parts.hostname or "") in LOOPBACK_HOSTS
+    ):
+        raise TypeError(
+            f"{name} must use https; plain http is allowed only for 127.0.0.1, "
+            "localhost or [::1] with allow_insecure_loopback=True"
+        )
+    return origin
+
+
 def normalize_api_version(version: str = "v1") -> str:
     """Validates an API route version before it is spliced into a URL.
 
