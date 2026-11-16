@@ -115,6 +115,53 @@ A `FingerlyEventPendingError` means the server has not decided yet: retry after
 fraud on that answer alone. The framework guides below answer it with `503` and
 `Retry-After`.
 
+## Read and write Apple DeviceCheck bits
+
+For an iOS identification whose App Attest evidence carried a DeviceCheck
+token, Fingerly holds the token for one hour, and a secret key of the same
+project and environment can spend it once: to read the device's two bits from
+Apple, or to set them. The bits mean what you decide; Fingerly never stores or
+reads them.
+
+Apple treats a DeviceCheck token as single-use, so a read and a write each need
+their own identification. A once-per-device free trial takes two:
+
+1. Query on the identification that asks for the trial. If the bit says the
+   device already had one, refuse it.
+2. Otherwise grant the trial and record the grant in your own data.
+3. Write the bit on the next identification from that install. Until the
+   write lands, your own record of the grant is what stops a second trial.
+
+```python
+from fingerly import FingerlyDeviceCheckError
+
+# The identification that asks for the trial.
+try:
+    bits = fingerly.device_check.query(request_id)
+    used_on_device = bits.found and bits.bit0
+except FingerlyDeviceCheckError as error:
+    if error.code not in ("device_check_not_held", "device_check_spent"):
+        raise
+    used_on_device = False  # no answer, not a verdict
+
+# The next identification, after you recorded the grant.
+fingerly.device_check.write(next_request_id, bit0=True)
+```
+
+`AsyncFingerly` has the same calls as coroutines. `write` sends only the bits
+you name; naming neither raises `TypeError` before anything is sent.
+
+Every non-2xx answer raises `FingerlyDeviceCheckError` (a `FingerlyAPIError`);
+branch on `code`: `device_check_not_held` (404), `device_check_spent`,
+`device_check_busy` or `credential_unavailable` (409), `bits_required` or
+`apple_rejected` (422, with Apple's HTTP status in `apple_status`), and
+`device_check_unavailable` (503).
+
+A `503` or a transport failure leaves the token held, and the SDK retries the
+identical request, at most twice. A held token kept for a retry accepts only
+the request it was first used for: a retry with the other operation or other
+bits answers `409 device_check_spent`. No other answer is retried.
+
 ## Webhooks
 
 ```python

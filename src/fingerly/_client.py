@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 import warnings
 from collections.abc import Mapping
 from datetime import datetime
@@ -23,11 +24,22 @@ from ._config import (
 )
 from ._errors import FingerlyAPIError, FingerlyConnectionError, FingerlyTimeoutError
 from ._http import MAX_RESPONSE_BYTES, AsyncPool, Reply, ResponseTooLargeError, SyncPool
-from ._models import Event, EventPage, parse_event, parse_page
+from ._models import (
+    DeviceCheckBits,
+    DeviceCheckWriteResult,
+    Event,
+    EventPage,
+    parse_device_check_bits,
+    parse_device_check_write,
+    parse_event,
+    parse_page,
+)
 from ._transport import (
     KeyAuth,
     api_error,
     decode_json,
+    device_check_body,
+    device_check_error,
     event_path,
     headers_for,
     list_params,
@@ -182,6 +194,134 @@ class AsyncEvents:
         return parse_page(await self._client._request("/events", params))
 
 
+class DeviceCheck:
+    """Spends the DeviceCheck token held for an iOS event, once.
+
+    Reached as ``fingerly.device_check``. Each held token pays for one Apple
+    call: a read or a write, never both. To read the bits and then set them,
+    read on one identification and write on the next.
+
+    A ``503 device_check_unavailable`` or a transport failure is retried with
+    the identical request: a token kept after an answer that was not definite
+    accepts only the request it was first used for.
+    """
+
+    def __init__(self, client: Fingerly) -> None:
+        self._client = client
+
+    def query(self, request_id: str) -> DeviceCheckBits:
+        """Reads the device's two bits from Apple, spending the event's token.
+
+        Args:
+            request_id: The ``request_id`` of an iOS identification made within
+                the last hour.
+
+        Raises:
+            FingerlyDeviceCheckError: On any non-2xx answer; see its ``code``.
+            FingerlyTimeoutError: If every attempt timed out.
+            FingerlyConnectionError: If the API could not be reached.
+        """
+        path = device_check_path(request_id) + "/query"
+        return parse_device_check_bits(self._spend("POST", path, None))
+
+    def write(
+        self,
+        request_id: str,
+        bit0: Optional[bool] = None,
+        bit1: Optional[bool] = None,
+    ) -> DeviceCheckWriteResult:
+        """Sets bit0, bit1 or both with Apple, spending the event's token.
+
+        A bit left as None keeps its value.
+
+        Raises:
+            TypeError: If neither bit is given. Nothing is sent.
+            FingerlyDeviceCheckError: On any non-2xx answer; see its ``code``.
+            FingerlyTimeoutError: If every attempt timed out.
+            FingerlyConnectionError: If the API could not be reached.
+        """
+        body = device_check_body(bit0, bit1)
+        path = device_check_path(request_id)
+        return parse_device_check_write(self._spend("PUT", path, body))
+
+    def _spend(
+        self, method: str, path: str, body: Optional[bytes]
+    ) -> Mapping[str, Any]:
+        for attempt in range(len(_DEVICE_CHECK_RETRY_DELAYS) + 1):
+            try:
+                return self._client._request(path, method=method, content=body)
+            except FingerlyAPIError as error:
+                if error.status != 503 or attempt == len(_DEVICE_CHECK_RETRY_DELAYS):
+                    raise device_check_error(error) from None
+                time.sleep(_retry_delay(attempt, error.retry_after))
+            except (FingerlyTimeoutError, FingerlyConnectionError):
+                if attempt == len(_DEVICE_CHECK_RETRY_DELAYS):
+                    raise
+                time.sleep(_retry_delay(attempt, None))
+        raise AssertionError("unreachable")  # pragma: no cover
+
+
+class AsyncDeviceCheck:
+    """Asyncio DeviceCheck reads and writes. Reached as ``fingerly.device_check``.
+
+    See :class:`DeviceCheck`; the coroutines take the same arguments.
+    """
+
+    def __init__(self, client: AsyncFingerly) -> None:
+        self._client = client
+
+    async def query(self, request_id: str) -> DeviceCheckBits:
+        """Reads the device's two bits. See :meth:`DeviceCheck.query`."""
+        path = device_check_path(request_id) + "/query"
+        return parse_device_check_bits(await self._spend("POST", path, None))
+
+    async def write(
+        self,
+        request_id: str,
+        bit0: Optional[bool] = None,
+        bit1: Optional[bool] = None,
+    ) -> DeviceCheckWriteResult:
+        """Sets bit0, bit1 or both. See :meth:`DeviceCheck.write`."""
+        body = device_check_body(bit0, bit1)
+        path = device_check_path(request_id)
+        return parse_device_check_write(await self._spend("PUT", path, body))
+
+    async def _spend(
+        self, method: str, path: str, body: Optional[bytes]
+    ) -> Mapping[str, Any]:
+        for attempt in range(len(_DEVICE_CHECK_RETRY_DELAYS) + 1):
+            try:
+                return await self._client._request(path, method=method, content=body)
+            except FingerlyAPIError as error:
+                if error.status != 503 or attempt == len(_DEVICE_CHECK_RETRY_DELAYS):
+                    raise device_check_error(error) from None
+                await asyncio.sleep(_retry_delay(attempt, error.retry_after))
+            except (FingerlyTimeoutError, FingerlyConnectionError):
+                if attempt == len(_DEVICE_CHECK_RETRY_DELAYS):
+                    raise
+                await asyncio.sleep(_retry_delay(attempt, None))
+        raise AssertionError("unreachable")  # pragma: no cover
+
+
+#: Pauses before each DeviceCheck retry, in seconds. A ``Retry-After`` answer
+#: replaces the pause, up to :data:`_MAX_DEVICE_CHECK_RETRY_DELAY`.
+_DEVICE_CHECK_RETRY_DELAYS: tuple[float, ...] = (0.25, 1.0)
+_MAX_DEVICE_CHECK_RETRY_DELAY = 5.0
+
+_JSON_BODY = {"content-type": "application/json"}
+
+
+def device_check_path(request_id: str) -> str:
+    """The DeviceCheck path of one event, the id encoded as one segment."""
+    return event_path(request_id) + "/device-check"
+
+
+def _retry_delay(attempt: int, retry_after: Optional[float]) -> float:
+    if retry_after is not None:
+        return min(retry_after, _MAX_DEVICE_CHECK_RETRY_DELAY)
+    return _DEVICE_CHECK_RETRY_DELAYS[attempt]
+
+
 class Fingerly(_BaseFingerly):
     """The Fingerly server SDK for synchronous code.
 
@@ -229,6 +369,7 @@ class Fingerly(_BaseFingerly):
 
         self._pool = SyncPool(build, self._timeout, limits, transport)
         self.events = Events(self)
+        self.device_check = DeviceCheck(self)
 
     def close(self) -> None:
         """Closes the pooled connections. Safe to call more than once."""
@@ -246,9 +387,14 @@ class Fingerly(_BaseFingerly):
         self.close()
 
     def _request(
-        self, path: str, params: Optional[Mapping[str, str]] = None
+        self,
+        path: str,
+        params: Optional[Mapping[str, str]] = None,
+        *,
+        method: str = "GET",
+        content: Optional[bytes] = None,
     ) -> Mapping[str, Any]:
-        """Performs one GET and decodes its body. Never retries.
+        """Performs one request and decodes its body. Never retries.
 
         Raises:
             FingerlyTimeoutError: If the request exceeds the client timeout.
@@ -257,7 +403,13 @@ class Fingerly(_BaseFingerly):
         """
         _warn_if_on_an_event_loop()
         try:
-            reply = self._pool.request("GET", path, params=params)
+            reply = self._pool.request(
+                method,
+                path,
+                params=params,
+                content=content,
+                headers=_JSON_BODY if content is not None else None,
+            )
         except httpx.TimeoutException as error:
             raise FingerlyTimeoutError() from error
         except httpx.HTTPError as error:
@@ -315,6 +467,7 @@ class AsyncFingerly(_BaseFingerly):
 
         self._pool = AsyncPool(build, self._timeout, limits, transport)
         self.events = AsyncEvents(self)
+        self.device_check = AsyncDeviceCheck(self)
 
     async def aclose(self) -> None:
         """Closes the pooled connections. Safe to call more than once."""
@@ -332,9 +485,14 @@ class AsyncFingerly(_BaseFingerly):
         await self.aclose()
 
     async def _request(
-        self, path: str, params: Optional[Mapping[str, str]] = None
+        self,
+        path: str,
+        params: Optional[Mapping[str, str]] = None,
+        *,
+        method: str = "GET",
+        content: Optional[bytes] = None,
     ) -> Mapping[str, Any]:
-        """Performs one GET and decodes its body. Never retries.
+        """Performs one request and decodes its body. Never retries.
 
         Raises:
             FingerlyTimeoutError: If the request exceeds the client timeout.
@@ -342,7 +500,13 @@ class AsyncFingerly(_BaseFingerly):
             FingerlyAPIError: On any non-2xx response.
         """
         try:
-            reply = await self._pool.request("GET", path, params=params)
+            reply = await self._pool.request(
+                method,
+                path,
+                params=params,
+                content=content,
+                headers=_JSON_BODY if content is not None else None,
+            )
         except httpx.TimeoutException as error:
             raise FingerlyTimeoutError() from error
         except httpx.HTTPError as error:

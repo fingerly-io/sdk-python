@@ -16,7 +16,11 @@ from urllib.parse import quote
 import httpx
 
 from ._config import REDACTED, Secret, positive_int
-from ._errors import FingerlyAPIError, FingerlyEventPendingError
+from ._errors import (
+    FingerlyAPIError,
+    FingerlyDeviceCheckError,
+    FingerlyEventPendingError,
+)
 from ._version import __version__
 
 #: Sent on every request so events record which SDK build made them.
@@ -213,6 +217,48 @@ def api_error(
         details=details,
         request_id=request_id,
         retry_after=retry_after_seconds(retry_after),
+    )
+
+
+def device_check_body(bit0: Optional[bool], bit1: Optional[bool]) -> bytes:
+    """Builds a DeviceCheck write body, naming only the bits given.
+
+    Raises:
+        TypeError: If neither bit is given, or a bit is not a bool. Nothing is
+            sent, so the held token is not touched.
+    """
+    bits: dict[str, bool] = {}
+    for name, value in (("bit0", bit0), ("bit1", bit1)):
+        if value is None:
+            continue
+        if not isinstance(value, bool):
+            raise TypeError(f"{name} must be a bool or None")
+        bits[name] = value
+    if not bits:
+        raise TypeError("Name bit0, bit1 or both")
+    return json.dumps(bits, separators=(",", ":")).encode()
+
+
+def device_check_error(error: FingerlyAPIError) -> FingerlyDeviceCheckError:
+    """Re-types an API error from a DeviceCheck route, reading ``apple_status``."""
+    apple_status: Optional[int] = None
+    if error.code == "apple_rejected" and isinstance(error.details, list):
+        for detail in error.details:
+            if isinstance(detail, dict) and detail.get("field") == "apple_status":
+                issue = detail.get("issue")
+                if isinstance(issue, str) and issue.isdigit():
+                    apple_status = int(issue)
+                elif isinstance(issue, int) and not isinstance(issue, bool):
+                    apple_status = issue
+                break
+    return FingerlyDeviceCheckError(
+        str(error),
+        error.status,
+        code=error.code,
+        details=error.details,
+        request_id=error.request_id,
+        retry_after=error.retry_after,
+        apple_status=apple_status,
     )
 
 

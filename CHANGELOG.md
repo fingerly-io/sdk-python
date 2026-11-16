@@ -2,6 +2,14 @@
 
 ## 0.3.0
 
+- Added `fingerly.device_check.query(request_id)` and
+  `fingerly.device_check.write(request_id, bit0=None, bit1=None)`, on
+  `Fingerly` and `AsyncFingerly`, which spend the DeviceCheck token held for
+  an iOS event to read or set the device's two bits. Answers are
+  `DeviceCheckBits` and `DeviceCheckWriteResult`; errors raise
+  `FingerlyDeviceCheckError` with the API `code` and, on `apple_rejected`,
+  `apple_status`. A `503` or a transport failure is retried with the identical
+  request.
 - Refreshed the vendored v3 OpenAPI and contract fixtures, removing retired
   deferred supplement schemas and routes, and added `Event.reason`,
   `Event.url_host`, `Event.url_path`, `Event.identifiable`,

@@ -268,6 +268,62 @@ class EventPage:
     page_size: int
 
 
+@dataclass(frozen=True)
+class DeviceCheckBits:
+    """What Apple holds for the device behind an iOS event.
+
+    The bits mean what you decided they mean; Fingerly never reads them.
+
+    Attributes:
+        found: False when Apple holds no bits for the device yet. Both bits
+            are then False.
+        bit0: The first bit.
+        bit1: The second bit.
+        last_update: When the bits last changed, as ``YYYY-MM``, or None when
+            Apple holds no bits.
+    """
+
+    found: bool
+    bit0: bool
+    bit1: bool
+    last_update: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DeviceCheckWriteResult:
+    """The bits Apple accepted on a write.
+
+    Attributes:
+        bit0: The value set for the first bit, or None when it was left out.
+        bit1: The value set for the second bit, or None when it was left out.
+    """
+
+    bit0: Optional[bool] = None
+    bit1: Optional[bool] = None
+
+
+def parse_device_check_bits(payload: Mapping[str, Any]) -> DeviceCheckBits:
+    """Builds :class:`DeviceCheckBits` from a query answer."""
+    last_update = payload.get("last_update")
+    return DeviceCheckBits(
+        found=_require(payload, "found", bool),
+        bit0=_require(payload, "bit0", bool),
+        bit1=_require(payload, "bit1", bool),
+        last_update=last_update
+        if isinstance(last_update, str) and last_update
+        else None,
+    )
+
+
+def parse_device_check_write(payload: Mapping[str, Any]) -> DeviceCheckWriteResult:
+    """Builds :class:`DeviceCheckWriteResult` from a write answer."""
+    bit0, bit1 = payload.get("bit0"), payload.get("bit1")
+    return DeviceCheckWriteResult(
+        bit0=bit0 if isinstance(bit0, bool) else None,
+        bit1=bit1 if isinstance(bit1, bool) else None,
+    )
+
+
 def parse_event(payload: Mapping[str, Any]) -> Event:
     """Builds an :class:`Event` from a decoded response body.
 

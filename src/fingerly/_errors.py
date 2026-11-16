@@ -70,6 +70,50 @@ class FingerlyAPIError(FingerlyError):
         return f"{type(self).__name__}(status={self.status}, code={self.code!r})"
 
 
+class FingerlyDeviceCheckError(FingerlyAPIError):
+    """Raised for any non-2xx answer from a DeviceCheck read or write.
+
+    Branch on ``code``:
+
+    - ``device_check_not_held`` (404): no token is held for that event. Decide
+      without the bits.
+    - ``device_check_spent`` (409): the token was already used, or a retry was
+      not the same request as the first attempt. Use another identification.
+    - ``device_check_busy`` (409): another call is using the token right now.
+    - ``credential_unavailable`` (409): the project's Apple key is missing,
+      refused by Apple, or has DeviceCheck off. The token is kept.
+    - ``bits_required`` (422): a write named neither bit.
+    - ``apple_rejected`` (422): Apple rejected the token, which is used up;
+      ``apple_status`` holds Apple's HTTP status.
+    - ``device_check_unavailable`` (503): Apple or storage could not answer;
+      the token is kept. The SDK has already retried the same request.
+
+    Attributes:
+        apple_status: Apple's HTTP status on ``apple_rejected``, else None.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        status: int,
+        *,
+        code: Optional[str] = None,
+        details: Any = None,
+        request_id: Optional[str] = None,
+        retry_after: Optional[float] = None,
+        apple_status: Optional[int] = None,
+    ) -> None:
+        super().__init__(
+            message,
+            status,
+            code=code,
+            details=details,
+            request_id=request_id,
+            retry_after=retry_after,
+        )
+        self.apple_status = apple_status
+
+
 class FingerlyEventPendingError(FingerlyAPIError):
     """Raised for ``404 event_pending`` from an event read.
 
