@@ -124,3 +124,37 @@ class FingerlyEventPendingError(FingerlyAPIError):
     retention) does not raise this class. Reads are never retried
     automatically.
     """
+
+
+class FingerlyEventAlreadyConsumedError(FingerlyAPIError):
+    """Raised for ``409 event_already_consumed`` from an event consume.
+
+    The event was consumed before, so it already backed one decision. It is
+    still a :class:`FingerlyAPIError`, with ``status`` 409 and ``code``
+    ``event_already_consumed``.
+
+    Attributes:
+        consumed_at: When the event was first consumed, as the RFC 3339 string
+            the API sent, or None when the answer did not say.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        status: int,
+        *,
+        code: Optional[str] = None,
+        details: Any = None,
+        request_id: Optional[str] = None,
+        retry_after: Optional[float] = None,
+        consumed_at: Optional[str] = None,
+    ) -> None:
+        super().__init__(
+            message,
+            status,
+            code=code,
+            details=details,
+            request_id=request_id,
+            retry_after=retry_after,
+        )
+        self.consumed_at = consumed_at

@@ -2,6 +2,12 @@
 
 ## 0.3.0
 
+- Added `fingerly.events.verify(request_id, max_age_seconds=300, tag=None,
+  consume=True)`, on `Fingerly` and `AsyncFingerly`, which reads an event and
+  checks it exists, is recent, carries the expected `tag`, is identifiable and
+  scored, then consumes it once, answering a `VerifyResult`; and
+  `fingerly.events.consume(request_id)`, answering a `ConsumeResult` or raising
+  `FingerlyEventAlreadyConsumedError` with `consumed_at`.
 - Added `fingerly.device_check.query(request_id)` and
   `fingerly.device_check.write(request_id, bit0=None, bit1=None)`, on
   `Fingerly` and `AsyncFingerly`, which spend the DeviceCheck token held for

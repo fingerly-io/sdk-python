@@ -25,18 +25,22 @@ from ._errors import (
     FingerlyConnectionError,
     FingerlyDeviceCheckError,
     FingerlyError,
+    FingerlyEventAlreadyConsumedError,
     FingerlyEventPendingError,
     FingerlyTimeoutError,
 )
 from ._models import (
     SIGNAL_NAMES,
     Attestation,
+    ConsumeResult,
     DeviceCheckBits,
     DeviceCheckWriteResult,
     Event,
     EventDocument,
     EventPage,
     EventTrigger,
+    VerifyReason,
+    VerifyResult,
 )
 from ._proxy import FingerlyProxy, ProxyRequest
 from ._version import __version__
@@ -48,6 +52,7 @@ __all__ = [
     "AsyncEvents",
     "AsyncFingerly",
     "Attestation",
+    "ConsumeResult",
     "DeviceCheck",
     "DeviceCheckBits",
     "DeviceCheckWriteResult",
@@ -61,10 +66,13 @@ __all__ = [
     "FingerlyConnectionError",
     "FingerlyDeviceCheckError",
     "FingerlyError",
+    "FingerlyEventAlreadyConsumedError",
     "FingerlyEventPendingError",
     "FingerlyProxy",
     "FingerlyTimeoutError",
     "ProxyRequest",
+    "VerifyReason",
+    "VerifyResult",
     "__version__",
     "verify_webhook",
 ]

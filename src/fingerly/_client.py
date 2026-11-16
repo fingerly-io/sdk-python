@@ -7,7 +7,7 @@ import threading
 import time
 import warnings
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from types import TracebackType
 from typing import Any, Optional, TypeVar, Union
 
@@ -22,17 +22,27 @@ from ._config import (
     parse_key,
     positive_seconds,
 )
-from ._errors import FingerlyAPIError, FingerlyConnectionError, FingerlyTimeoutError
+from ._errors import (
+    FingerlyAPIError,
+    FingerlyConnectionError,
+    FingerlyEventAlreadyConsumedError,
+    FingerlyTimeoutError,
+)
 from ._http import MAX_RESPONSE_BYTES, AsyncPool, Reply, ResponseTooLargeError, SyncPool
 from ._models import (
+    ConsumeResult,
     DeviceCheckBits,
     DeviceCheckWriteResult,
     Event,
     EventPage,
+    VerifyResult,
+    failed_check,
+    parse_consume,
     parse_device_check_bits,
     parse_device_check_write,
     parse_event,
     parse_page,
+    parse_verified_event,
 )
 from ._transport import (
     KeyAuth,
@@ -42,10 +52,21 @@ from ._transport import (
     device_check_error,
     event_path,
     headers_for,
+    is_not_found,
     list_params,
+    verify_options,
 )
 
 DEFAULT_TIMEOUT = 10.0
+
+#: How old an event ``events.verify`` accepts by default, in seconds.
+DEFAULT_MAX_AGE_SECONDS = 300
+
+
+def _now() -> datetime:
+    """The current instant, timezone-aware, that an event's age is taken from."""
+    return datetime.now(timezone.utc)
+
 
 _Self = TypeVar("_Self", bound="_BaseFingerly")
 
@@ -137,6 +158,81 @@ class Events:
         """
         return parse_event(self._client._request(event_path(request_id)))
 
+    def consume(self, request_id: str) -> ConsumeResult:
+        """Marks an event as consumed, so it backs one decision only.
+
+        The first call answers with ``first=True``; every later one raises.
+        Never retried.
+
+        Args:
+            request_id: The ``request_id`` returned by identification.
+
+        Raises:
+            TypeError: If the request id is empty. Nothing is sent.
+            FingerlyEventAlreadyConsumedError: ``409 event_already_consumed``
+                when the event was consumed before; ``consumed_at`` says when.
+            FingerlyAPIError: ``404 event_not_found``, and any other non-2xx
+                answer.
+            FingerlyTimeoutError: If the request exceeds the client timeout.
+        """
+        path = event_path(request_id) + "/consume"
+        return parse_consume(self._client._request(path, method="POST"))
+
+    def verify(
+        self,
+        request_id: str,
+        *,
+        max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
+        tag: Optional[str] = None,
+        consume: bool = True,
+    ) -> VerifyResult:
+        """Reads an event and checks it can back a backend action.
+
+        The checks run in this order and stop at the first failure: the event
+        exists (``not_found``), it occurred at most ``max_age_seconds`` ago
+        (``too_old``; a missing or unreadable time fails too), it carries
+        ``tag`` exactly when one is given (``tag_mismatch``), it has a
+        visitor id (``unidentifiable``) and a score (``unscored``). Only then,
+        unless ``consume=False``, is it consumed (``already_consumed``). The
+        score's value is never judged: that policy stays with the caller.
+
+        Args:
+            request_id: The ``request_id`` returned by identification.
+            max_age_seconds: Oldest acceptable event, in seconds.
+            tag: The tag the event must carry, or None to skip the check.
+            consume: Whether to consume the event when every check passes.
+
+        Raises:
+            TypeError: If an option or the request id is unusable. Nothing is
+                sent.
+            FingerlyEventPendingError: ``404 event_pending``; not a verdict.
+            FingerlyAPIError: Any answer other than ``event_not_found`` and,
+                on consume, ``event_already_consumed``.
+            FingerlyTimeoutError: If a request exceeds the client timeout.
+        """
+        verify_options(max_age_seconds, tag, consume)
+        path = event_path(request_id)
+        try:
+            payload = self._client._request(path)
+        except FingerlyAPIError as error:
+            if is_not_found(error):
+                return VerifyResult(ok=False, reason="not_found")
+            raise
+        event, occurred = parse_verified_event(payload)
+        reason = failed_check(event, occurred, _now(), max_age_seconds, tag)
+        if reason:
+            return VerifyResult(ok=False, reason=reason, event=event)
+        if consume:
+            try:
+                self._client._request(path + "/consume", method="POST")
+            except FingerlyEventAlreadyConsumedError:
+                return VerifyResult(ok=False, reason="already_consumed", event=event)
+            except FingerlyAPIError as error:
+                if is_not_found(error):
+                    return VerifyResult(ok=False, reason="not_found")
+                raise
+        return VerifyResult(ok=True, reason="", event=event)
+
     def list(
         self,
         from_: Union[datetime, str, None] = None,
@@ -176,6 +272,43 @@ class AsyncEvents:
         See :meth:`Events.get`; this coroutine takes the same arguments.
         """
         return parse_event(await self._client._request(event_path(request_id)))
+
+    async def consume(self, request_id: str) -> ConsumeResult:
+        """Marks an event as consumed. See :meth:`Events.consume`."""
+        path = event_path(request_id) + "/consume"
+        return parse_consume(await self._client._request(path, method="POST"))
+
+    async def verify(
+        self,
+        request_id: str,
+        *,
+        max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
+        tag: Optional[str] = None,
+        consume: bool = True,
+    ) -> VerifyResult:
+        """Reads and checks an event, then consumes it. See :meth:`Events.verify`."""
+        verify_options(max_age_seconds, tag, consume)
+        path = event_path(request_id)
+        try:
+            payload = await self._client._request(path)
+        except FingerlyAPIError as error:
+            if is_not_found(error):
+                return VerifyResult(ok=False, reason="not_found")
+            raise
+        event, occurred = parse_verified_event(payload)
+        reason = failed_check(event, occurred, _now(), max_age_seconds, tag)
+        if reason:
+            return VerifyResult(ok=False, reason=reason, event=event)
+        if consume:
+            try:
+                await self._client._request(path + "/consume", method="POST")
+            except FingerlyEventAlreadyConsumedError:
+                return VerifyResult(ok=False, reason="already_consumed", event=event)
+            except FingerlyAPIError as error:
+                if is_not_found(error):
+                    return VerifyResult(ok=False, reason="not_found")
+                raise
+        return VerifyResult(ok=True, reason="", event=event)
 
     async def list(
         self,

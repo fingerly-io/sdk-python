@@ -103,17 +103,52 @@ The archived `document` arrives moments after the event itself, so check
 
 ## Verify a backend action
 
-Read the event with a server-only key. Check that its tag matches your action,
-that it is recent, that its environment is correct, and that it was scored.
-Apply your own policy to the server's verdict. Do not authorize an action using
-scores or visitor identifiers supplied by the browser. Tags correlate events;
-they do not replace your application's authentication or replay protection.
-A tag must never hold a personal identifier, such as a user ID, email, install
-ID or advertising ID, because the server keeps tags in long-lived rollups.
-A `FingerlyEventPendingError` means the server has not decided yet: retry after
-`retry_after` seconds or verify asynchronously, and do not refuse the action as
-fraud on that answer alone. The framework guides below answer it with `503` and
-`Retry-After`.
+Send the browser's `requestId` to your server and verify it there with a
+server-only key. `fingerly.events.verify` reads the event and runs these
+checks in order, stopping at the first that fails:
+
+1. `not_found`: the event does not exist for this key's environment.
+2. `too_old`: it occurred more than `max_age_seconds` ago (300 by default). A
+   missing or unreadable `occurred_at` fails too.
+3. `tag_mismatch`: you passed `tag` and the event's tag is not exactly that.
+4. `unidentifiable`: the event has no visitor id.
+5. `unscored`: the event has no `suspect_score`.
+6. `already_consumed`: the event was consumed before.
+
+Consumption comes last, only when every other check passed, so one event backs
+one decision: a replayed `requestId` answers `already_consumed`. Pass
+`consume=False` to check without consuming. The result is a `VerifyResult`
+with `ok`, `reason` (`""` when `ok`) and `event` (None only for `not_found`).
+
+`verify` never judges the score: that policy stays with you. Check
+`suspect_level` or `suspect_score` after `ok`.
+
+```python
+result = fingerly.events.verify(request_id, tag="checkout")
+if not result.ok:
+    refuse(result.reason)
+elif result.event.suspect_level == "high":
+    send_to_review(result.event)
+else:
+    allow()
+```
+
+`AsyncFingerly` has the same call as a coroutine. An invalid option (a
+`max_age_seconds` that is not a positive integer, an empty `tag`) raises
+`TypeError` before anything is sent. `fingerly.events.consume(request_id)`
+consumes an event on its own: the first call answers a `ConsumeResult` with
+`first=True`, and every later one raises `FingerlyEventAlreadyConsumedError`, a
+`FingerlyAPIError` whose `consumed_at` says when. Neither call is retried.
+
+Do not authorize an action using scores or visitor identifiers supplied by the
+browser. Tags correlate events; they do not replace your application's
+authentication. A tag must never hold a personal identifier, such as a user ID,
+email, install ID or advertising ID, because the server keeps tags in
+long-lived rollups. `verify` raises every error other than `event_not_found`
+and `event_already_consumed`. A `FingerlyEventPendingError` means the server has
+not decided yet: retry after `retry_after` seconds or verify asynchronously,
+and do not refuse the action as fraud on that answer alone. The framework
+guides below answer it with `503` and `Retry-After`.
 
 ## Read and write Apple DeviceCheck bits
 

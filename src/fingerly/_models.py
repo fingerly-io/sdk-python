@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Optional
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from typing import Any, Literal, Optional
 
 from ._errors import FingerlyError
 
@@ -300,6 +300,118 @@ class DeviceCheckWriteResult:
 
     bit0: Optional[bool] = None
     bit1: Optional[bool] = None
+
+
+@dataclass(frozen=True)
+class ConsumeResult:
+    """The answer to consuming an event.
+
+    Attributes:
+        request_id: The consumed event's request id.
+        consumed_at: When it was consumed, as the RFC 3339 string the API sent.
+        first: True when this call consumed it.
+    """
+
+    request_id: str
+    consumed_at: str
+    first: bool
+
+
+#: Why :meth:`Events.verify` refused an event, or ``""`` when it passed.
+VerifyReason = Literal[
+    "",
+    "not_found",
+    "too_old",
+    "tag_mismatch",
+    "unidentifiable",
+    "unscored",
+    "already_consumed",
+]
+
+
+@dataclass(frozen=True)
+class VerifyResult:
+    """The outcome of :meth:`Events.verify`.
+
+    Attributes:
+        ok: True when every check passed, and the event was consumed unless
+            ``consume=False``.
+        reason: ``""`` when ``ok``; otherwise the first check that failed:
+            ``not_found``, ``too_old``, ``tag_mismatch``, ``unidentifiable``,
+            ``unscored`` or ``already_consumed``.
+        event: The event read, or None only for ``not_found``. When its
+            ``occurred_at`` was missing or unreadable (reason ``too_old``),
+            ``event.occurred_at`` is the earliest UTC ``datetime`` and
+            ``event.raw`` holds what the API sent.
+    """
+
+    ok: bool
+    reason: VerifyReason
+    event: Optional[Event] = None
+
+
+def parse_consume(payload: Mapping[str, Any]) -> ConsumeResult:
+    """Builds :class:`ConsumeResult` from a consume answer."""
+    return ConsumeResult(
+        request_id=_require(payload, "request_id", str),
+        consumed_at=_require(payload, "consumed_at", str),
+        first=_require(payload, "first", bool),
+    )
+
+
+_UNKNOWN_INSTANT = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def parse_verified_event(
+    payload: Mapping[str, Any],
+) -> tuple[Event, Optional[datetime]]:
+    """Builds the event ``verify`` checks, tolerating what the checks judge.
+
+    A missing ``visitor_id`` reads as ``""`` (unidentifiable), and a missing or
+    unreadable ``occurred_at`` as the earliest instant, so either becomes a
+    failed check instead of an exception.
+
+    Returns:
+        The event, and its ``occurred_at`` or None when it was unusable.
+    """
+    occurred: Optional[datetime]
+    try:
+        occurred = parse_instant(payload.get("occurred_at"))  # type: ignore[arg-type]
+    except (FingerlyError, ValueError):
+        occurred = None
+    patched = dict(payload)
+    patched["occurred_at"] = "0001-01-01T00:00:00Z"
+    if not isinstance(patched.get("visitor_id"), str):
+        patched["visitor_id"] = ""
+    event = replace(
+        parse_event(patched),
+        occurred_at=occurred if occurred is not None else _UNKNOWN_INSTANT,
+        raw=payload,
+    )
+    return event, occurred
+
+
+def failed_check(
+    event: Event,
+    occurred: Optional[datetime],
+    now: datetime,
+    max_age_seconds: int,
+    tag: Optional[str],
+) -> VerifyReason:
+    """The first of ``verify``'s checks before consumption that fails, or ``""``.
+
+    The order is fixed: age, tag, identifiability, scoring. The score's value,
+    level and triggers are never looked at.
+    """
+    if occurred is None or (now - occurred).total_seconds() > max_age_seconds:
+        return "too_old"
+    if tag is not None and (event.tag or "") != tag:
+        return "tag_mismatch"
+    if not event.visitor_id:
+        return "unidentifiable"
+    if event.suspect_score is None:
+        return "unscored"
+    return ""
 
 
 def parse_device_check_bits(payload: Mapping[str, Any]) -> DeviceCheckBits:
