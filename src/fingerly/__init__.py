@@ -20,15 +20,25 @@ from ._errors import (
     FingerlyEventPendingError,
     FingerlyTimeoutError,
 )
-from ._models import Event, EventPage, EventTrigger
+from ._models import (
+    SIGNAL_NAMES,
+    Attestation,
+    Event,
+    EventDocument,
+    EventPage,
+    EventTrigger,
+)
 from ._proxy import FingerlyProxy, ProxyRequest
 from ._version import __version__
 from ._webhooks import verify_webhook
 
 __all__ = [
+    "SIGNAL_NAMES",
     "AsyncEvents",
     "AsyncFingerly",
+    "Attestation",
     "Event",
+    "EventDocument",
     "EventPage",
     "EventTrigger",
     "Events",

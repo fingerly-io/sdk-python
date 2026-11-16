@@ -23,7 +23,7 @@ Send = Callable[[MutableMapping[str, Any]], Awaitable[None]]
 
 
 class ASGIProxy:
-    """ASGI application serving the browser SDK's same-origin requests.
+    """ASGI application relaying single-path raw-byte Fingerly ingest requests.
 
     Reached as ``proxy.asgi``. Route the dashboard-issued path to it under
     FastAPI, Starlette, Django 3+, Quart, Litestar or any other ASGI
@@ -56,7 +56,7 @@ class ASGIProxy:
         try:
             body = await _read_body(receive, self._proxy.max_body_bytes)
         except BodyTooLargeError:
-            await _send(send, self._proxy.too_large())
+            await _send(send, self._proxy.too_large(screening.cors))
             return
         if body is None:
             await self._answer_nobody(send)

@@ -16,7 +16,14 @@ from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
 
-from fingerly import Fingerly, FingerlyAPIError, verify_webhook
+from fingerly import (
+    SIGNAL_NAMES,
+    Attestation,
+    EventDocument,
+    Fingerly,
+    FingerlyAPIError,
+    verify_webhook,
+)
 
 CONTRACT = Path(__file__).resolve().parent.parent / "contract"
 SPEC: dict[str, Any] = json.loads((CONTRACT / "openapi.json").read_text())
@@ -138,3 +145,76 @@ class TestWebhookFixtures:
             signature=fixture["signature"],
             now=stale,
         )
+
+
+class TestV3Contract:
+    def test_v3_openapi_and_models(self) -> None:
+        assert "/api/v1/events/{request_id}/supplement" not in SPEC["paths"]
+        assert "SupplementOut" not in SPEC["components"]["schemas"]
+        assert "AttestEnvelope" in SPEC["components"]["schemas"]
+
+        v3_signals = [
+            "attestation_failed",
+            "device_inconsistent",
+            "report_incomplete",
+            "tampering",
+            "custom_root_ca",
+            "secondary_user_profile",
+        ]
+        for sig in v3_signals:
+            assert sig in SIGNAL_NAMES
+
+        payload: dict[str, Any] = {
+            "request_id": "0199a963-e400-7000-8000-000000000099",
+            "project_id": "0199a963-e400-7000-8000-0000000000a1",
+            "visitor_id": "",
+            "occurred_at": "2026-09-17T12:00:00Z",
+            "state": "unavailable",
+            "reason": "ip_lookup_failed",
+            "environment": "development",
+            "platform": "android",
+            "sdk_platform": "android",
+            "sdk_version": "0.3.0",
+            "url_host": "shop.test",
+            "url_path": "/checkout",
+            "suspect_score": None,
+            "triggers": [
+                {"signal": sig, "weight": 4, "confidence": "high"} for sig in v3_signals
+            ],
+            "has_document": True,
+            "document": {
+                "schema": 1,
+                "request_id": "0199a963-e400-7000-8000-000000000099",
+                "occurred_at": "2026-09-17T12:00:00Z",
+                "sdk": {"platform": "android", "version": "0.3.0"},
+                "ip_network": "203.0.113.0/24",
+                "attestation": {
+                    "state": "attested",
+                    "platform": "android",
+                    "status": "verified",
+                    "revocation_checked": True,
+                    "package_bound": True,
+                    "signer_bound": True,
+                },
+            },
+        }
+        errors = list(validator_for("SDKEventOut").iter_errors(payload))
+        assert not errors, [err.message for err in errors]
+
+        with Fingerly(
+            secret_key=SECRET_KEY,
+            transport=Recorder(json_response(payload)).transport(),
+        ) as client:
+            event = client.events.get(payload["request_id"])
+
+        assert event.visitor_id == ""
+        assert event.identifiable is False
+        assert event.reason == "ip_lookup_failed"
+        assert event.url_host == "shop.test"
+        assert event.url_path == "/checkout"
+        assert [t.signal for t in event.triggers] == v3_signals
+        doc = event.parse_document()
+        assert isinstance(doc, EventDocument)
+        assert isinstance(doc.attestation, Attestation)
+        assert doc.attestation.status == "verified"
+        assert doc.attestation.platform == "android"

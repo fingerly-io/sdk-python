@@ -20,7 +20,7 @@ StartResponse = Callable[[str, list[tuple[str, str]]], Any]
 
 
 class WSGIProxy:
-    """WSGI application serving the browser SDK's same-origin requests.
+    """WSGI application relaying single-path raw-byte Fingerly ingest requests.
 
     Reached as ``proxy.wsgi``. Mount it at the dashboard-issued path under
     Flask, Django's sync stack, Pyramid or any other WSGI framework::
@@ -48,9 +48,9 @@ class WSGIProxy:
             # A visitor can send broken framing at will. Servers report it with
             # types of their own, none shared, and uncaught each one is an
             # error-level traceback in the server's log.
-            return _write(start_response, self._proxy.malformed())
+            return _write(start_response, self._proxy.malformed(screening.cors))
         if body is None:
-            return _write(start_response, self._proxy.too_large())
+            return _write(start_response, self._proxy.too_large(screening.cors))
 
         response = self._proxy.forward(screening, request, body)
         return _write(start_response, response)

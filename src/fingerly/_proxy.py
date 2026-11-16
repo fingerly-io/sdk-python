@@ -19,6 +19,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -75,6 +76,42 @@ RELAYED_HEADERS = (
     "ratelimit-limit",
     "ratelimit-remaining",
     "retry-after",
+)
+
+#: Exact lowercase native and bridge SDK platform identifiers allowed through
+#: the sanitize-and-restore header sequence.
+VALID_SDK_PLATFORMS = frozenset(
+    {
+        "ios",
+        "android",
+        "react-native",
+        "react-native-ios",
+        "react-native-android",
+        "flutter",
+        "flutter-ios",
+        "flutter-android",
+        "lynx-ios",
+        "lynx-android",
+        "capacitor",
+        "kotlin-multiplatform",
+    }
+)
+
+#: Browser fetch-metadata and client-hint headers forwarded verbatim when present.
+CLIENT_METADATA_HEADERS = (
+    "sec-fetch-site",
+    "sec-fetch-mode",
+    "sec-fetch-dest",
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+)
+
+CORS_ALLOW_HEADERS = "content-type, x-api-key, idempotency-key, x-fingerly-sdk-platform"
+CORS_EXPOSE_HEADERS = "x-request-id, ratelimit-limit, ratelimit-remaining, retry-after"
+MISSING_ORIGIN_BODY = (
+    b'{"error":{"code":"missing_origin",'
+    b'"message":"Origin header is required","status":400}}'
 )
 
 
@@ -161,11 +198,13 @@ class Screening(NamedTuple):
         refusal: The response to send, when the request is refused.
         api_key: The key to present upstream, when it is not.
         client_ip: The visitor address ``client_ip`` resolved, when it is not.
+        cors: Matched cross-origin ``Origin``, when ``allowed_origins`` matched.
     """
 
     refusal: Optional[ProxyResponse]
     api_key: str = ""
     client_ip: str = ""
+    cors: Optional[str] = None
 
     def __repr__(self) -> str:
         # In the deprecated secret-key mode ``api_key`` is the secret itself.
@@ -212,6 +251,7 @@ class FingerlyProxy:
         upstream: Optional[str] = None,
         max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
         timeout: float = DEFAULT_TIMEOUT,
+        allowed_origins: Optional[Sequence[str]] = None,
         transport: Optional[httpx.BaseTransport] = None,
         async_transport: Optional[httpx.AsyncBaseTransport] = None,
         limits: Optional[httpx.Limits] = None,
@@ -266,6 +306,7 @@ class FingerlyProxy:
         self._path = None if path is None else _normalize_path(path)
         self._max_body_bytes = positive_int(max_body_bytes, "max_body_bytes")
         self._timeout = positive_seconds(timeout, "timeout")
+        self._allowed_origins = _parse_allowed_origins(allowed_origins)
         self._client_ip = client_ip
         self._transport = transport
         self._async_transport = async_transport
@@ -312,35 +353,55 @@ class FingerlyProxy:
         if not self._answers(request):
             return Screening(_refuse(404, "Not Found"))
 
+        origin = request.headers.get("origin", "").strip()
+        cors = origin if origin and origin in self._allowed_origins else None
+
+        if request.method == "OPTIONS" and cors is not None:
+            return Screening(_preflight(cors), cors=cors)
+
         if request.method != "POST":
-            return Screening(_refuse(405, "Method Not Allowed", (("allow", "POST"),)))
+            allow = "POST, OPTIONS" if self._allowed_origins else "POST"
+            return Screening(
+                _refuse(405, "Method Not Allowed", (("allow", allow),), cors=cors),
+                cors=cors,
+            )
 
         api_key = self._upstream_key_for(request.headers.get("x-api-key"))
         if api_key is None:
-            return Screening(_refuse(401, "Unauthorized"))
+            return Screening(_refuse(401, "Unauthorized", cors=cors), cors=cors)
+
+        # Sanitize-and-restore Step 1-4: capture validated x-fingerly-sdk-platform
+        # before stripping incoming x-fingerly-* headers, and reject with 400
+        # missing_origin iff both Origin and validated platform are empty.
+        raw_platform = request.headers.get("x-fingerly-sdk-platform", "")
+        sdk_platform = raw_platform if raw_platform in VALID_SDK_PLATFORMS else ""
+        if not origin and not sdk_platform:
+            return Screening(
+                _json_refuse(400, MISSING_ORIGIN_BODY, cors=cors), cors=cors
+            )
 
         # Refuse on the declared size first; the adapter enforces the real one.
         declared = request.headers.get("content-length", "")
         if declared.isdecimal() and int(declared) > self._max_body_bytes:
-            return Screening(_refuse(413, "Payload Too Large"))
+            return Screening(_refuse(413, "Payload Too Large", cors=cors), cors=cors)
 
         client_ip = self._resolve_client_ip(request)
         if client_ip is None:
-            return Screening(_refuse(500, NO_CLIENT_IP))
+            return Screening(_refuse(500, NO_CLIENT_IP, cors=cors), cors=cors)
 
-        return Screening(None, api_key, client_ip)
+        return Screening(None, api_key, client_ip, cors)
 
-    def too_large(self) -> ProxyResponse:
+    def too_large(self, cors: Optional[str] = None) -> ProxyResponse:
         """The response for a body that exceeded the limit while streaming."""
-        return _refuse(413, "Payload Too Large")
+        return _refuse(413, "Payload Too Large", cors=cors)
 
     def client_gone(self) -> ProxyResponse:
         """The response recorded for a visitor who disconnected first."""
         return _refuse(499, "Client closed request")
 
-    def malformed(self) -> ProxyResponse:
+    def malformed(self, cors: Optional[str] = None) -> ProxyResponse:
         """The response for a request body the server could not read."""
-        return _refuse(400, "Bad Request")
+        return _refuse(400, "Bad Request", cors=cors)
 
     def forward(
         self, screening: Screening, request: ProxyRequest, body: bytes
@@ -356,8 +417,8 @@ class FingerlyProxy:
                 "POST", self._upstream_url, headers=_on_the_wire(headers), content=body
             )
         except (httpx.HTTPError, ResponseTooLargeError) as error:
-            return self._upstream_failed(error)
-        return _relay(reply)
+            return self._upstream_failed(error, cors=screening.cors)
+        return _relay(reply, cors=screening.cors)
 
     async def aforward(
         self, screening: Screening, request: ProxyRequest, body: bytes
@@ -369,10 +430,12 @@ class FingerlyProxy:
                 "POST", self._upstream_url, headers=_on_the_wire(headers), content=body
             )
         except (httpx.HTTPError, ResponseTooLargeError) as error:
-            return self._upstream_failed(error)
-        return _relay(reply)
+            return self._upstream_failed(error, cors=screening.cors)
+        return _relay(reply, cors=screening.cors)
 
-    def _upstream_failed(self, error: Exception) -> ProxyResponse:
+    def _upstream_failed(
+        self, error: Exception, cors: Optional[str] = None
+    ) -> ProxyResponse:
         """Answers an upstream failure without raising, in one log line.
 
         A timeout is a 504 and anything else a 502, so no framework turns
@@ -380,18 +443,18 @@ class FingerlyProxy:
         """
         if isinstance(error, httpx.TimeoutException):
             logger.warning("Proxy upstream timed out after %.1f s", self._timeout)
-            return _refuse(504, "Gateway timeout")
+            return _refuse(504, "Gateway timeout", cors=cors)
         logger.warning("Proxy upstream failed: %s", _failure_reason(error))
-        return _refuse(502, "Bad gateway")
+        return _refuse(502, "Bad gateway", cors=cors)
 
     def upstream_headers(
         self, request: ProxyRequest, api_key: str, client_ip: Optional[str] = None
     ) -> dict[str, str]:
-        """Builds the upstream headers.
+        """Builds the upstream headers from scratch.
 
-        Nothing is copied wholesale: only the body's content type, the visitor
-        metadata Fingerly needs, the version this proxy reports, and an
-        idempotency key when the SDK sent one.
+        All incoming ``x-fingerly-*``, ``cookie`` and ``authorization`` headers
+        are stripped; only verified proxy metadata and allowlisted client
+        headers cross the proxy boundary.
 
         Args:
             request: The incoming request.
@@ -407,19 +470,31 @@ class FingerlyProxy:
             if client_ip is None:
                 raise TypeError(NO_CLIENT_IP)
 
-        headers = {
-            "content-type": request.headers.get("content-type", "application/json"),
+        headers: dict[str, str] = {
+            "content-type": request.headers.get("content-type") or "application/json",
             "x-api-key": api_key,
             "x-fingerly-client-ip": client_ip,
-            "x-fingerly-origin": request.headers.get("origin", ""),
             "x-fingerly-user-agent": request.headers.get("user-agent", ""),
             "x-fingerly-proxy-version": PROXY_VERSION,
         }
         if self._uses_proxy_key:
             headers["x-fingerly-proxy-key"] = self._key.reveal()
+        origin = request.headers.get("origin", "").strip()
+        if origin:
+            headers["x-fingerly-origin"] = origin
+        raw_platform = request.headers.get("x-fingerly-sdk-platform", "")
+        if raw_platform in VALID_SDK_PLATFORMS:
+            headers["x-fingerly-sdk-platform"] = raw_platform
+        host = request.headers.get("host", "").strip()
+        if host:
+            headers["x-fingerly-host"] = host
         idempotency_key = request.headers.get("idempotency-key")
         if idempotency_key:
             headers["idempotency-key"] = idempotency_key
+        for name in CLIENT_METADATA_HEADERS:
+            value = request.headers.get(name)
+            if value:
+                headers[name] = value
         return headers
 
     def close(self) -> None:
@@ -611,8 +686,51 @@ def _report_bad_client_ip() -> None:
         )
 
 
+def _parse_allowed_origins(origins: Optional[Sequence[str]]) -> frozenset[str]:
+    """Validates configured cross-origin browser origins."""
+    if origins is None:
+        return frozenset()
+    if isinstance(origins, (str, bytes)) or not isinstance(origins, Sequence):
+        raise TypeError("allowed_origins must be a sequence of origin strings")
+    validated: set[str] = set()
+    for item in origins:
+        if not isinstance(item, str):
+            raise TypeError("allowed_origins entries must be strings")
+        normalized = normalize_endpoint(item.strip())
+        if urlsplit(normalized).path:
+            raise TypeError("allowed_origins entries must be bare HTTP(S) origins")
+        validated.add(normalized)
+    return frozenset(validated)
+
+
+def _cors_headers(cors: Optional[str]) -> list[tuple[str, str]]:
+    """Builds cross-origin CORS response headers when an allowed origin matched."""
+    if cors is None:
+        return []
+    return [
+        ("access-control-allow-origin", cors),
+        ("vary", "Origin"),
+        ("access-control-allow-methods", "POST, OPTIONS"),
+        ("access-control-allow-headers", CORS_ALLOW_HEADERS),
+        ("access-control-expose-headers", CORS_EXPOSE_HEADERS),
+    ]
+
+
+def _preflight(cors: str) -> ProxyResponse:
+    """Builds a 204 preflight response for a matched cross-origin request."""
+    headers = [
+        ("cache-control", "no-store"),
+        ("allow", "POST, OPTIONS"),
+        *_cors_headers(cors),
+    ]
+    return ProxyResponse(204, headers, b"")
+
+
 def _refuse(
-    status: int, message: str, extra: Sequence[tuple[str, str]] = ()
+    status: int,
+    message: str,
+    extra: Sequence[tuple[str, str]] = (),
+    cors: Optional[str] = None,
 ) -> ProxyResponse:
     """Builds a plain-text refusal that never reaches Fingerly."""
     body = message.encode("ascii")
@@ -622,6 +740,18 @@ def _refuse(
         ("cache-control", "no-store"),
     ]
     headers.extend(extra)
+    headers.extend(_cors_headers(cors))
+    return ProxyResponse(status, headers, body)
+
+
+def _json_refuse(status: int, body: bytes, cors: Optional[str] = None) -> ProxyResponse:
+    """Builds a structured JSON refusal before upstream forwarding."""
+    headers = [
+        ("content-type", "application/json"),
+        ("content-length", str(len(body))),
+        ("cache-control", "no-store"),
+        *_cors_headers(cors),
+    ]
     return ProxyResponse(status, headers, body)
 
 
@@ -638,7 +768,7 @@ def _failure_reason(error: Exception) -> str:
     return "transport error"
 
 
-def _relay(reply: Reply) -> ProxyResponse:
+def _relay(reply: Reply, cors: Optional[str] = None) -> ProxyResponse:
     """Returns the upstream response to the browser, allowlisted headers only.
 
     The body was read in full before this runs, so a truncated answer is a
@@ -654,6 +784,7 @@ def _relay(reply: Reply) -> ProxyResponse:
         if name in reply.headers and reply.headers[name].isascii()
     ]
     headers.append(("cache-control", "no-store"))
+    headers.extend(_cors_headers(cors))
     if reply.status not in BODILESS_STATUSES:
         headers.append(("content-length", str(len(body))))
     return ProxyResponse(reply.status, headers, body)

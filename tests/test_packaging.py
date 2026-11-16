@@ -40,6 +40,7 @@ def test_the_proxy_identifies_itself_upstream() -> None:
         "PATH_INFO": "/p",
         "CONTENT_LENGTH": "2",
         "HTTP_X_API_KEY": "fly_pk_development_test",
+        "HTTP_ORIGIN": "https://shop.test",
         "wsgi.input": __import__("io").BytesIO(b"{}"),
     }
     proxy.wsgi(environ, lambda status, headers: None)
