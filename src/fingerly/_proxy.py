@@ -274,8 +274,9 @@ class FingerlyProxy:
                 as either present or already stripped by the mount. Omit it
                 when the framework already routes only that path here.
             api_version: Version of the upstream ingest URL.
-            upstream: Overrides the API origin implied by the key.
-                ``https`` is required.
+            upstream: Overrides the API origin implied by the key. Only a
+                scheme, a host and an optional port, such as
+                ``https://api.example.com:8443``; ``https`` is required.
             allow_insecure_loopback: For local development and tests only:
                 lets ``upstream`` be plain ``http`` on 127.0.0.1, localhost or
                 [::1]. Every other ``http`` upstream is refused either way.

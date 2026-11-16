@@ -223,10 +223,12 @@ method other than `POST` (plus `OPTIONS` when `allowed_origins` is configured)
 gets `405`. The method is matched exactly, so `post` gets `405` too. Event
 reads need a secret key and stay unreachable from a browser by construction.
 
-`upstream` replaces the API origin for testing against a local API. It must
-be `https`. Plain `http` is accepted only for `127.0.0.1`, `localhost` or
-`[::1]`, and only with `allow_insecure_loopback=True`, which is meant for local
-development and tests:
+`upstream` replaces the API origin for testing against a local API. It takes a
+scheme, a host and an optional port and nothing else: a path, query, fragment,
+credentials, space or control character is refused when the proxy is built.
+It must be `https`. Plain `http` is accepted only for `127.0.0.1`, `localhost`
+or `[::1]`, and only with `allow_insecure_loopback=True`, which is meant for
+local development and tests:
 
 ```python
 proxy = FingerlyProxy(
@@ -268,7 +270,8 @@ malformed or truncated response or one over 4 MiB, `502 Bad gateway`. A
 redirect is never followed, whatever transport you supply, and an upstream
 redirect or a status outside 200 to 599 is answered `502` too. All of these
 are short plain text marked `no-store`, and each writes one line, with no stack
-trace, to the `fingerly.proxy` logger.
+trace, to the `fingerly.proxy` logger. The line names the kind of failure only,
+never the upstream address or a key.
 
 Back to the browser it relays only `content-type`, `x-request-id`,
 `ratelimit-limit`, `ratelimit-remaining` and `retry-after`, plus its own

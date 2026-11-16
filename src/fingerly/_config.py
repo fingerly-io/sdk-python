@@ -122,6 +122,10 @@ def normalize_endpoint(value: str) -> str:
     return value.rstrip("/")
 
 
+#: Printable ASCII with no space: anything else in an API origin option is a
+#: copy and paste mistake, never part of an origin.
+_ORIGIN_BYTES = re.compile(r"\A[\x21-\x7e]+\Z")
+
 #: The only hosts a plain HTTP API origin may name, and only when
 #: ``allow_insecure_loopback`` is set.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -130,9 +134,11 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 def normalize_api_origin(
     value: object, allow_insecure_loopback: bool, name: str
 ) -> str:
-    """Validates an API origin option and requires ``https``.
+    """Validates an API origin option and rebuilds it from its parts.
 
-    Plain ``http`` is accepted only for 127.0.0.1, localhost or [::1], and only
+    Only a scheme, a host and an optional port are accepted: no path, query,
+    fragment, credentials, space or control byte. The scheme is ``https``;
+    plain ``http`` is accepted only for 127.0.0.1, localhost or [::1], and only
     when ``allow_insecure_loopback`` is set, because a key travels with every
     request. The value is never echoed in the error.
 
@@ -147,21 +153,36 @@ def normalize_api_origin(
     """
     if not isinstance(allow_insecure_loopback, bool):
         raise TypeError("allow_insecure_loopback must be a bool")
+    problem = f"{name} must be an https:// origin with only a host and an optional port"
+    if not isinstance(value, str) or _ORIGIN_BYTES.match(value) is None:
+        raise TypeError(problem)
     try:
-        origin = normalize_endpoint(value)  # type: ignore[arg-type]
-    except TypeError:
-        raise TypeError(
-            f"{name} must be an HTTP(S) URL without credentials, query, or fragment"
-        ) from None
-    parts = urlsplit(origin)
+        parts = urlsplit(value)
+        port = parts.port  # Validated on access, not by urlsplit.
+        httpx.URL(value)
+    except (ValueError, httpx.InvalidURL):
+        raise TypeError(problem) from None
+    host = parts.hostname or ""
+    if (
+        parts.scheme not in ("http", "https")
+        or not host
+        or "@" in parts.netloc
+        or "?" in value
+        or "#" in value
+        or parts.path not in ("", "/")
+    ):
+        raise TypeError(problem)
     if parts.scheme == "http" and not (
-        allow_insecure_loopback and (parts.hostname or "") in LOOPBACK_HOSTS
+        allow_insecure_loopback and host in LOOPBACK_HOSTS
     ):
         raise TypeError(
             f"{name} must use https; plain http is allowed only for 127.0.0.1, "
             "localhost or [::1] with allow_insecure_loopback=True"
         )
-    return origin
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return f"{parts.scheme}://{netloc}"
 
 
 def normalize_api_version(version: str = "v1") -> str:
