@@ -218,10 +218,10 @@ Browser and proxied native client SDKs post a single `v: 3` identification
 envelope to that one path. The proxy forwards its raw request body bytes
 verbatim (without JSON decoding or re-serialising) to Fingerly's one ingest URL,
 `https://api.fingerly.io/api/v1/ingest`, and to nothing else. Any path other
-than the configured one (retired `/supplement` subpaths included) gets `404`,
-and any method other than `POST` (plus `OPTIONS` when `allowed_origins` is
-configured) gets `405`. Event reads need a secret key and stay unreachable from
-a browser by construction.
+than the configured one (`/supplement` subpaths included) gets `404`, and any
+method other than `POST` (plus `OPTIONS` when `allowed_origins` is configured)
+gets `405`. The method is matched exactly, so `post` gets `405` too. Event
+reads need a secret key and stay unreachable from a browser by construction.
 
 `upstream` replaces the API origin for testing against a local API. It must
 be `https`. Plain `http` is accepted only for `127.0.0.1`, `localhost` or
