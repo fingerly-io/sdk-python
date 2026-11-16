@@ -264,9 +264,11 @@ never passed on. The proxy reports itself upstream as `python/0.3.0` in
 
 When Fingerly cannot be reached in time the proxy answers `504 Gateway
 timeout`, and on any other upstream failure, such as a refused connection, a
-malformed or truncated response or one over 4 MiB, `502 Bad gateway`. Both are
-short plain text marked `no-store`, and each writes one line, with no stack
-trace, to the `fingerly.proxy` logger.
+malformed or truncated response or one over 4 MiB, `502 Bad gateway`. A
+redirect is never followed, whatever transport you supply, and an upstream
+redirect is answered `502` too. All of these are short plain text marked
+`no-store`, and each writes one line, with no stack trace, to the
+`fingerly.proxy` logger.
 
 Back to the browser it relays only `content-type`, `x-request-id`,
 `ratelimit-limit`, `ratelimit-remaining` and `retry-after`, plus its own

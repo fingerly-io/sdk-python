@@ -428,7 +428,7 @@ class FingerlyProxy:
             )
         except (httpx.HTTPError, ResponseTooLargeError) as error:
             return self._upstream_failed(error, cors=screening.cors)
-        return _relay(reply, cors=screening.cors)
+        return self._relay_or_refuse(reply, cors=screening.cors)
 
     async def aforward(
         self, screening: Screening, request: ProxyRequest, body: bytes
@@ -441,7 +441,20 @@ class FingerlyProxy:
             )
         except (httpx.HTTPError, ResponseTooLargeError) as error:
             return self._upstream_failed(error, cors=screening.cors)
-        return _relay(reply, cors=screening.cors)
+        return self._relay_or_refuse(reply, cors=screening.cors)
+
+    def _relay_or_refuse(
+        self, reply: Reply, cors: Optional[str] = None
+    ) -> ProxyResponse:
+        """Relays an answer, or answers 502 for an upstream redirect.
+
+        A redirect is never followed or passed on, since its target would
+        receive the proxy key on the next hop.
+        """
+        if 300 <= reply.status <= 399:
+            logger.warning("Proxy upstream failed: unexpected status")
+            return _refuse(502, "Bad gateway", cors=cors)
+        return _relay(reply, cors=cors)
 
     def _upstream_failed(
         self, error: Exception, cors: Optional[str] = None
