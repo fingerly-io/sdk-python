@@ -1,10 +1,14 @@
 # fingerly
 
-Server-side event reads, webhook verification and a same-origin proxy for
+Server-side event reads, webhook verification and a first-party proxy for
 Python. Two clients share one API: `Fingerly` for synchronous code such as
 Django and Flask, and `AsyncFingerly` for asyncio code such as FastAPI and
 Starlette. Python 3.9 or newer. One runtime dependency, `httpx`. The proxy
 serves both ASGI and WSGI, so it mounts under either.
+
+```sh
+pip install "fingerly>=0.3.0"
+```
 
 ```python
 import os
@@ -49,9 +53,18 @@ never follow one. `FingerlyTimeoutError` and `FingerlyConnectionError` cover a
 deadline and an unreachable API; all three derive from `FingerlyError`.
 
 `ip_network` is the network the request came from (an IPv4 /24 or an IPv6
-/40, such as `203.0.113.0/24`); the API never returns the address. `document`,
-when available, is an allow-listed view of the archived request with no raw
-signals, user agent or address.
+/40, such as `203.0.113.0/24`); the API never returns the address. When a
+submission is unidentifiable (`event.identifiable is False`, such as
+insufficient entropy, a genuine embedded WebView, or an unmatched high-risk Web
+payload), `event.visitor_id` is `""`; there are no `deferred_token`,
+`deferred_signals` or `supplements` fields in `v: 3`. `document`, when
+available, is an allow-listed view of the archived request with no raw signals,
+user agent or address, and `event.parse_document()` decodes it into a typed
+`EventDocument` (including `attestation: Optional[Attestation]`). `SIGNAL_NAMES`
+lists the canonical signal identifiers, including the `v: 3` anti-spoofing and
+integrity signals `"attestation_failed"`, `"device_inconsistent"`,
+`"report_incomplete"`, `"tampering"`, `"custom_root_ca"` and
+`"secondary_user_profile"`.
 `suspect_score` is `None` when the request was not scored, and must not be
 treated as zero. `Event` declares every documented field as an attribute and
 falls back to the decoded body for fields added later, so a new server field
@@ -77,7 +90,8 @@ one of two codes:
   retention.
 
 The archived `document` arrives moments after the event itself, so check
-`has_document` rather than assuming it is there.
+`has_document` rather than assuming it is there, and call
+`event.parse_document()` when you want a typed `EventDocument`.
 
 ## Verify a backend action
 
@@ -200,24 +214,35 @@ const fingerly = await load({ apiKey: 'fly_pk_…', endpoints: '/k7x2qm4a' })
 
 ### What the proxy does
 
-The browser SDK posts both of its calls, the identification and the report
-that follows it, to that one path. The proxy forwards each, as it is, to
-Fingerly's one ingest URL, `https://api.fingerly.io/api/v1/ingest`, and to
-nothing else. A path other than the configured one gets `404`, and any method
-but `POST` gets `405`. Event reads need a secret key and stay unreachable from
+Browser and proxied native client SDKs post a single `v: 3` identification
+envelope to that one path. The proxy forwards its raw request body bytes
+verbatim (without JSON decoding or re-serialising) to Fingerly's one ingest URL,
+`https://api.fingerly.io/api/v1/ingest`, and to nothing else. Any path other
+than the configured one (retired `/supplement` subpaths included) gets `404`,
+and any method other than `POST` (plus `OPTIONS` when `allowed_origins` is
+configured) gets `405`. Event reads need a secret key and stay unreachable from
 a browser by construction.
 
-The browser must present a public key from the same environment as the proxy
-key, or the request gets `401`. Bodies over 1 MiB get `413`, enforced
-while streaming rather than after buffering, and under WSGI a body the server
-cannot read, such as broken chunked framing, gets `400`. Responses are marked
-`no-store`.
+The caller must present a public key from the same environment as the proxy
+key, or the request gets `401`. Incoming headers follow the sanitize-and-restore
+sequence: all incoming `x-fingerly-*`, `cookie` and `authorization` headers are
+stripped, restoring `x-fingerly-sdk-platform` only when it matches an exact
+lowercase native or bridge platform (`ios`, `android`, `react-native`,
+`react-native-ios`, `react-native-android`, `flutter`, `flutter-ios`,
+`flutter-android`, `lynx-ios`, `lynx-android`, `capacitor`,
+`kotlin-multiplatform`). Requests carrying neither `Origin` nor a validated
+`x-fingerly-sdk-platform` are rejected locally with `400` (`missing_origin`),
+and `x-fingerly-origin` is never synthesized from `Host`, `Referer` or the
+request URL. Bodies over 1 MiB get `413`, enforced while streaming rather than
+after buffering, and under WSGI a body the server cannot read, such as broken
+chunked framing, gets `400`. Responses are marked `no-store`.
 
-Only the content type, the visitor metadata Fingerly needs, and an
-`idempotency-key` are forwarded. Customer cookies and authorization headers are
-never passed on. The proxy reports itself upstream as `python/<version>` in
+Alongside verified proxy metadata (`x-fingerly-host` included), only
+`content-type`, `x-api-key`, `user-agent`, `idempotency-key`, `sec-fetch-*` and
+`sec-ch-ua-*` are forwarded. Customer cookies and authorization headers are
+never passed on. The proxy reports itself upstream as `python/0.3.0` in
 `x-fingerly-proxy-version`, which the dashboard shows per proxy, and sends
-`fingerly-python/<version>` as its user agent.
+`fingerly-python/0.3.0` as its user agent.
 
 When Fingerly cannot be reached in time the proxy answers `504 Gateway
 timeout`, and on any other upstream failure, such as a refused connection, a
@@ -335,7 +360,11 @@ async def verify(request_id: str, request: Request):
         raise HTTPException(503, headers={"Retry-After": retry_after}) from None
     except FingerlyAPIError as error:
         raise HTTPException(404 if error.status == 404 else 502) from None
-    return {"visitor_id": event.visitor_id, "suspect_score": event.suspect_score}
+    return {
+        "identifiable": event.identifiable,
+        "visitor_id": event.visitor_id,
+        "suspect_score": event.suspect_score,
+    }
 ```
 
 The same works under `uvicorn --workers 4` or gunicorn's uvicorn worker: each
@@ -426,7 +455,11 @@ def verify(request, request_id):
         status = 404 if error.status == 404 else 502
         return JsonResponse({"error": error.code}, status=status)
     return JsonResponse(
-        {"visitor_id": event.visitor_id, "suspect_score": event.suspect_score}
+        {
+            "identifiable": event.identifiable,
+            "visitor_id": event.visitor_id,
+            "suspect_score": event.suspect_score,
+        }
     )
 ```
 
@@ -480,7 +513,11 @@ def verify(request_id):
         return {"error": error.code}, 503, {"Retry-After": retry_after}
     except FingerlyAPIError as error:
         abort(404 if error.status == 404 else 502)
-    return {"visitor_id": event.visitor_id, "suspect_score": event.suspect_score}
+    return {
+        "identifiable": event.identifiable,
+        "visitor_id": event.visitor_id,
+        "suspect_score": event.suspect_score,
+    }
 ```
 
 A `DispatcherMiddleware` mount answers everything under its path too, which is
