@@ -197,7 +197,7 @@ class Screening(NamedTuple):
 
     Attributes:
         refusal: The response to send, when the request is refused.
-        api_key: The key to present upstream, when it is not.
+        api_key: The browser's public key to present upstream, when it is not.
         client_ip: The visitor address ``client_ip`` resolved, when it is not.
         cors: Matched cross-origin ``Origin``, when ``allowed_origins`` matched.
     """
@@ -208,7 +208,6 @@ class Screening(NamedTuple):
     cors: Optional[str] = None
 
     def __repr__(self) -> str:
-        # In the deprecated secret-key mode ``api_key`` is the secret itself.
         return (
             f"Screening(refusal={self.refusal!r}, api_key={REDACTED}, "
             f"client_ip={self.client_ip!r})"
@@ -246,7 +245,6 @@ class FingerlyProxy:
         self,
         client_ip: Callable[[ProxyRequest], str],
         proxy_key: Optional[str] = None,
-        secret_key: Optional[str] = None,
         path: Optional[str] = None,
         api_version: str = "v1",
         upstream: Optional[str] = None,
@@ -265,8 +263,9 @@ class FingerlyProxy:
                 app trusts. Never read the left-most ``X-Forwarded-For`` value:
                 the visitor writes it. Called under both standards, so it must
                 be synchronous.
-            proxy_key: A proxy key, ``fly_px_…``, held only on your server.
-            secret_key: Deprecated alternative to ``proxy_key``.
+            proxy_key: Required. A proxy key, ``fly_px_<environment>_…``, held
+                only on your server. Browsers must present a public key,
+                ``fly_pk_…``, for the same environment.
             path: The path the dashboard issued for this proxy, such as
                 ``/k7x2qm4a``, within the application. When set, only that
                 path is answered, exactly, and anything else gets 404. It
@@ -293,19 +292,13 @@ class FingerlyProxy:
         Raises:
             TypeError: If a credential, route, limit or callback is invalid.
         """
-        if not proxy_key and not secret_key:
+        if not proxy_key:
             raise TypeError("A Fingerly proxy key is required")
-        if proxy_key and secret_key:
-            raise TypeError("Pass proxy_key or deprecated secret_key, not both")
         if not callable(client_ip):
             raise TypeError("client_ip is required")
 
-        self._uses_proxy_key = bool(proxy_key)
-        raw_key: str = proxy_key or secret_key or ""
-        self._scope: KeyScope = parse_key(
-            raw_key, "px" if self._uses_proxy_key else "sk"
-        )
-        self._key = Secret(raw_key)
+        self._scope: KeyScope = parse_key(proxy_key, "px")
+        self._key = Secret(proxy_key)
         self._upstream_url = (
             normalize_api_origin(
                 upstream if upstream is not None else DEFAULT_ENDPOINT,
@@ -327,10 +320,9 @@ class FingerlyProxy:
         self._lock = threading.Lock()
 
     def __repr__(self) -> str:
-        kind = "proxy_key" if self._uses_proxy_key else "secret_key"
         return (
             f"FingerlyProxy(path={self._path!r}, upstream={self._upstream_url!r}, "
-            f"{kind}={self._key!r})"
+            f"proxy_key={self._key!r})"
         )
 
     @property
@@ -498,12 +490,11 @@ class FingerlyProxy:
         headers: dict[str, str] = {
             "content-type": request.headers.get("content-type") or "application/json",
             "x-api-key": api_key,
+            "x-fingerly-proxy-key": self._key.reveal(),
             "x-fingerly-client-ip": client_ip,
             "x-fingerly-user-agent": request.headers.get("user-agent", ""),
             "x-fingerly-proxy-version": PROXY_VERSION,
         }
-        if self._uses_proxy_key:
-            headers["x-fingerly-proxy-key"] = self._key.reveal()
         # One channel only: a browser Origin wins, as it does when the same
         # request is sent to the API directly. The API refuses a proxied
         # request that carries both.
@@ -578,17 +569,14 @@ class FingerlyProxy:
         return request.path == self._path
 
     def _upstream_key_for(self, presented: Optional[str]) -> Optional[str]:
-        """Decides which key to present upstream.
+        """Checks the browser's key before anything is forwarded.
 
-        With a proxy key the browser must supply a public key for the same
-        environment, which the proxy forwards alongside its own. The
-        deprecated secret-key mode authenticates on its own.
+        The browser must supply a public key, ``fly_pk_…``, for the proxy
+        key's environment. The proxy forwards it alongside its own proxy key.
 
         Returns:
-            The key to forward, or None when the caller is unauthorised.
+            The public key to forward, or None when the caller is unauthorised.
         """
-        if not self._uses_proxy_key:
-            return self._key.reveal()
         try:
             browser = parse_key(presented or "", "pk")
         except TypeError:

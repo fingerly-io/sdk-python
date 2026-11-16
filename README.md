@@ -248,8 +248,12 @@ proxy = FingerlyProxy(
 )
 ```
 
-The caller must present a public key from the same environment as the proxy
-key, or the request gets `401`. Incoming headers follow the sanitize-and-restore
+`proxy_key` is required, and a missing or malformed one fails when the proxy is
+built. The caller must present a public key (`fly_pk_…`) from the same
+environment as the proxy key, or the request gets `401` and nothing is
+forwarded. Upstream, the proxy sends that public key as `X-API-Key` and its own
+proxy key as `X-Fingerly-Proxy-Key`; a secret key is never part of the proxy.
+Incoming headers follow the sanitize-and-restore
 sequence: all incoming `x-fingerly-*`, `cookie` and `authorization` headers are
 stripped, restoring `x-fingerly-sdk-platform` only when it matches an exact
 lowercase native or bridge platform (`ios`, `android`, `react-native`,

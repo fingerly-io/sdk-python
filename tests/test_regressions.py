@@ -292,13 +292,17 @@ class TestEndpointsRefusedAtConstruction:
 
 class TestScreeningRedaction:
     def test_repr_does_not_print_the_key_it_will_present(self) -> None:
-        proxy = FingerlyProxy(secret_key=SECRET_KEY, client_ip=lambda _: "203.0.113.7")
+        proxy = FingerlyProxy(proxy_key=PROXY_KEY, client_ip=lambda _: "203.0.113.7")
         screening = proxy.screen(
-            ProxyRequest("POST", "/x", Headers([("origin", "https://shop.test")]))
+            ProxyRequest(
+                "POST",
+                "/x",
+                Headers([("origin", "https://shop.test"), ("x-api-key", PUBLIC_KEY)]),
+            )
         )
-        assert screening.api_key == SECRET_KEY
-        assert SECRET_KEY not in repr(screening)
-        assert SECRET_KEY not in str(screening)
+        assert screening.api_key == PUBLIC_KEY
+        assert PUBLIC_KEY not in repr(screening)
+        assert PUBLIC_KEY not in str(screening)
 
 
 class TestOneTlsContext:

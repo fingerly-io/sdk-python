@@ -18,6 +18,8 @@
   synthesising `x-fingerly-origin`), forwarding of `Sec-Fetch-*` and
   `Sec-CH-UA-*` client metadata headers, optional cross-origin
   `allowed_origins` CORS handling, and verbatim raw-byte forwarding.
+- `FingerlyProxy` requires `proxy_key`, checks the browser's same-environment
+  public key on every request, and never sends a secret key upstream.
 
 ## 0.2.0
 

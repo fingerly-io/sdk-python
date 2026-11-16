@@ -155,10 +155,6 @@ class TestConstruction:
         with pytest.raises(TypeError):
             FingerlyProxy(client_ip=lambda request: "")
         with pytest.raises(TypeError):
-            FingerlyProxy(
-                client_ip=lambda request: "", proxy_key=PROXY_KEY, secret_key="x"
-            )
-        with pytest.raises(TypeError):
             FingerlyProxy(client_ip=None, proxy_key=PROXY_KEY)  # type: ignore[arg-type]
 
     def test_rejects_a_key_of_the_wrong_kind(self) -> None:
@@ -651,16 +647,55 @@ class TestClientIp:
         assert recorder.calls == 0
 
 
-class TestDeprecatedSecretKey:
-    def test_forwards_the_secret_key_without_a_public_key(self) -> None:
+class TestNoSecretKeyUpstream:
+    """The proxy holds only a proxy key and never relays a secret key."""
+
+    def test_has_no_secret_key_parameter(self) -> None:
+        with pytest.raises(TypeError):
+            FingerlyProxy(  # type: ignore[call-arg]
+                client_ip=lambda request: "203.0.113.10",
+                secret_key="fly_sk_development_test",
+            )
+        with pytest.raises(TypeError):
+            FingerlyProxy(  # type: ignore[call-arg]
+                client_ip=lambda request: "203.0.113.10",
+                proxy_key=PROXY_KEY,
+                secret_key="fly_sk_development_test",
+            )
+
+    def test_requires_a_well_formed_proxy_key(self) -> None:
+        for key in [None, "", "fly_px_", "fly_px_moon_test", "fly_px_development_a b"]:
+            with pytest.raises(TypeError):
+                FingerlyProxy(client_ip=lambda request: "203.0.113.10", proxy_key=key)
+
+    def test_refuses_a_browser_presenting_a_secret_key(self) -> None:
         recorder = Recorder(json_response({}))
-        legacy = proxy(recorder, proxy_key=None, secret_key="fly_sk_development_test")
-        for adapter, call in both(legacy):
-            status, _, _ = call(adapter, headers={"origin": "https://shop.test"})
+        for adapter, call in both(proxy(recorder)):
+            for presented in [
+                "fly_sk_development_test",
+                "fly_pk_production_test",
+                "fly_px_development_test",
+                "",
+            ]:
+                headers = {"origin": "https://shop.test"}
+                if presented:
+                    headers["x-api-key"] = presented
+                status, response_headers, _ = call(adapter, headers=headers)
+                assert status == 401
+                assert response_headers["content-type"].startswith("text/plain")
+                assert response_headers["cache-control"] == "no-store"
+        assert recorder.calls == 0
+
+    def test_forwards_only_the_public_key_and_the_proxy_key(self) -> None:
+        recorder = Recorder(json_response({}))
+        for adapter, call in both(proxy(recorder)):
+            status, _, _ = call(adapter, headers=BROWSER)
             assert status == 200
+        assert len(recorder.requests) == 2
         for upstream in recorder.requests:
-            assert upstream.headers["x-api-key"] == "fly_sk_development_test"
-            assert "x-fingerly-proxy-key" not in upstream.headers
+            assert upstream.headers["x-api-key"] == PUBLIC_KEY
+            assert upstream.headers["x-fingerly-proxy-key"] == PROXY_KEY
+            assert not any("fly_sk_" in value for value in upstream.headers.values())
 
 
 class TestLifecycle:
