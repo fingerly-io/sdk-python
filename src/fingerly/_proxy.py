@@ -446,12 +446,13 @@ class FingerlyProxy:
     def _relay_or_refuse(
         self, reply: Reply, cors: Optional[str] = None
     ) -> ProxyResponse:
-        """Relays an answer, or answers 502 for an upstream redirect.
+        """Relays an answer, or answers 502 for a status the proxy never relays.
 
         A redirect is never followed or passed on, since its target would
-        receive the proxy key on the next hop.
+        receive the proxy key on the next hop, and a status outside 200 to 599
+        is not one a browser or an intermediary can act on.
         """
-        if 300 <= reply.status <= 399:
+        if not (200 <= reply.status <= 599) or 300 <= reply.status <= 399:
             logger.warning("Proxy upstream failed: unexpected status")
             return _refuse(502, "Bad gateway", cors=cors)
         return _relay(reply, cors=cors)
