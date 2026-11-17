@@ -168,6 +168,17 @@ class TestV3Contract:
         ]
         for sig in v3_signals:
             assert sig in SIGNAL_NAMES
+        # An event's triggers are its signal groups; the raw signals are in the
+        # document's risk report.
+        v3_groups = [
+            "attestation_failed",
+            "device_inconsistent",
+            "report_incomplete",
+            "bot",
+            "browser_tampering",
+            "custom_root_ca",
+            "secondary_user_profile",
+        ]
 
         payload: dict[str, Any] = {
             "request_id": "0199a963-e400-7000-8000-000000000099",
@@ -184,7 +195,7 @@ class TestV3Contract:
             "url_path": "/checkout",
             "suspect_score": None,
             "triggers": [
-                {"signal": sig, "weight": 4, "confidence": "high"} for sig in v3_signals
+                {"signal": sig, "weight": 4, "confidence": "high"} for sig in v3_groups
             ],
             "has_document": True,
             "document": {
@@ -217,7 +228,7 @@ class TestV3Contract:
         assert event.reason == "ip_lookup_failed"
         assert event.url_host == "shop.test"
         assert event.url_path == "/checkout"
-        assert [t.signal for t in event.triggers] == v3_signals
+        assert [t.signal for t in event.triggers] == v3_groups
         doc = event.parse_document()
         assert isinstance(doc, EventDocument)
         assert isinstance(doc.attestation, Attestation)
