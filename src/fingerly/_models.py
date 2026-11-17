@@ -79,6 +79,8 @@ SIGNAL_NAMES: tuple[str, ...] = (
     "automation",
     "bad_bot",
     "fetch_metadata_missing",
+    "web_ticket_missing",
+    "web_ticket_invalid",
     "high_activity",
     "incognito_mode",
     "incognito",

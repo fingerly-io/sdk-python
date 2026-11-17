@@ -69,8 +69,8 @@ user agent or address, and `event.parse_document()` decodes it into a typed
 lists the canonical signal identifiers, including the `v: 3` anti-spoofing and
 integrity signals `"attestation_failed"`, `"attestation_downgrade"`,
 `"device_inconsistent"`, `"report_incomplete"`, `"probe_errors"`,
-`"fetch_metadata_missing"`, `"tampering"`, `"custom_root_ca"` and
-`"secondary_user_profile"`. A native `Attestation` also carries
+`"fetch_metadata_missing"`, `"web_ticket_missing"`, `"web_ticket_invalid"`,
+`"tampering"`, `"custom_root_ca"` and `"secondary_user_profile"`. A native `Attestation` also carries
 `attest_skipped` (the app's reason for sending no proof) and `downgrade` (the
 report named an install an attested device owns).
 `suspect_score` is `None` when the request was not scored, and must not be

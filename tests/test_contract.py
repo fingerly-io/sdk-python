@@ -160,6 +160,8 @@ class TestV3Contract:
             "report_incomplete",
             "probe_errors",
             "fetch_metadata_missing",
+            "web_ticket_missing",
+            "web_ticket_invalid",
             "tampering",
             "custom_root_ca",
             "secondary_user_profile",

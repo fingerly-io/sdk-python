@@ -22,8 +22,8 @@
   `Event.parse_document()`, `EventDocument`, `Attestation`, and `SIGNAL_NAMES`
   covering all v3 signals (`attestation_failed`, `attestation_downgrade`,
   `device_inconsistent`, `report_incomplete`, `probe_errors`,
-  `fetch_metadata_missing`, `tampering`, `custom_root_ca`,
-  `secondary_user_profile`), with `attest_skipped` and `downgrade` on
+  `fetch_metadata_missing`, `web_ticket_missing`, `web_ticket_invalid`,
+  `tampering`, `custom_root_ca`, `secondary_user_profile`), with `attest_skipped` and `downgrade` on
   `Attestation`.
 - Updated `FingerlyProxy` (ASGI and WSGI) to enforce the single-path
   `proxy.md` relay contract: sanitize-and-restore validation of
