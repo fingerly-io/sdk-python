@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0
+
+- Added `str` enums for the fixed values the API and webhooks send:
+  `Signal`, `SuspectLevel`, `Confidence`, `EventState`, `Environment`,
+  `AttestationState`, `AttestationStatus`, `AttestSkippedReason`,
+  `VerifyReason` and `WebhookEventType`. Every member equals and hashes like
+  its raw string, so `event.suspect_level == SuspectLevel.HIGH` and
+  `Signal.FINGERPRINT_SUPPRESSED in signals` work on parsed events. Model
+  fields stay typed `str` and hold the value as sent, so a value a newer
+  server adds still parses as a plain string.
+- `VerifyReason` is an enum class instead of a `Literal` alias, and
+  `VerifyResult.reason` is a `VerifyReason` member: `VerifyReason.OK` (equal
+  to `""`) when `ok`, otherwise the failed check. This is a breaking change
+  for type checkers; the runtime values are the same strings.
+- `Signal` and `SIGNAL_NAMES` match the server: they include
+  `repeated_reinstall`, `device_activity_high` and
+  `device_activity_very_high`, and no longer list `app_attest_key_churn`.
+
 ## 0.3.0
 
 - Added `fingerly.events.verify(request_id, max_age_seconds=300, tag=None,
