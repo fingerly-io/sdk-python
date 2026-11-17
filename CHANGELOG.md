@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1
+
+- `AttestSkippedReason` documents each member: when the iOS and Android SDKs
+  send `not_offered`, `unsupported`, `challenge_unavailable`, `key_error`,
+  `timeout`, `backoff` and `install_unavailable`.
+- The vendored OpenAPI contract declares the enums for the fixed string
+  values, and the contract test sends signal groups as event triggers.
+
 ## 0.4.0
 
 - Added `str` enums for the fixed values the API and webhooks send:
