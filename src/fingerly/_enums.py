@@ -168,6 +168,24 @@ class AttestSkippedReason(_StrEnum):
     """The app's own reason for sending no attestation, ``Attestation.attest_skipped``.
 
     Diagnostic only; it never lowers the score.
+
+    - ``NOT_OFFERED``: the challenge offered no attestation: on iOS the SDK
+      key has no Apple app ID for App Attest, on Android the app's transport
+      returned no challenge offer.
+    - ``UNSUPPORTED``: the device cannot make an attested key: App Attest is
+      not supported on the iOS device, or Android is older than 7.0 (API 24).
+    - ``CHALLENGE_UNAVAILABLE``: no usable challenge ticket: the challenge
+      request failed, or on Android the ticket it returned was malformed.
+    - ``KEY_ERROR``: the platform key store failed to create, attest or sign
+      with the key, or on Android the stored key record could not be read.
+    - ``TIMEOUT``: attestation did not finish in time: a key store call ran
+      past its budget, or another identification held the attestation step
+      too long.
+    - ``BACKOFF``: the server rejected a new key from this install (on iOS,
+      also when it asked for a replacement), and the SDK is waiting out a
+      backoff before it registers another.
+    - ``INSTALL_UNAVAILABLE``: the report has no usable install ID, or on iOS
+      the stored key record could not be read or saved.
     """
 
     NOT_OFFERED = "not_offered"
