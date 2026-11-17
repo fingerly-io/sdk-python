@@ -24,6 +24,7 @@ from fingerly import (
     FingerlyAPIError,
     FingerlyEventAlreadyConsumedError,
     FingerlyEventPendingError,
+    VerifyReason,
     VerifyResult,
 )
 
@@ -204,7 +205,9 @@ class TestVerify:
     def test_not_found_on_the_read(self) -> None:
         get = error_response("event_not_found", 404)
         for result, recorder in verify_both(get):
-            assert result == VerifyResult(ok=False, reason="not_found", event=None)
+            assert result == VerifyResult(
+                ok=False, reason=VerifyReason.NOT_FOUND, event=None
+            )
             assert posts(recorder) == 0
 
     def test_too_old(self) -> None:
@@ -311,7 +314,9 @@ class TestVerify:
         get = json_response(fresh_event())
         post = error_response("event_not_found", 404)
         for result, recorder in verify_both(get, post):
-            assert result == VerifyResult(ok=False, reason="not_found", event=None)
+            assert result == VerifyResult(
+                ok=False, reason=VerifyReason.NOT_FOUND, event=None
+            )
             assert posts(recorder) == 1
 
     def test_other_consume_errors_are_raised(self) -> None:

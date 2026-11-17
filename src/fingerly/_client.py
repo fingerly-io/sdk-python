@@ -22,6 +22,7 @@ from ._config import (
     parse_key,
     positive_seconds,
 )
+from ._enums import VerifyReason
 from ._errors import (
     FingerlyAPIError,
     FingerlyConnectionError,
@@ -216,7 +217,7 @@ class Events:
             payload = self._client._request(path)
         except FingerlyAPIError as error:
             if is_not_found(error):
-                return VerifyResult(ok=False, reason="not_found")
+                return VerifyResult(ok=False, reason=VerifyReason.NOT_FOUND)
             raise
         event, occurred = parse_verified_event(payload)
         reason = failed_check(event, occurred, _now(), max_age_seconds, tag)
@@ -226,12 +227,14 @@ class Events:
             try:
                 self._client._request(path + "/consume", method="POST")
             except FingerlyEventAlreadyConsumedError:
-                return VerifyResult(ok=False, reason="already_consumed", event=event)
+                return VerifyResult(
+                    ok=False, reason=VerifyReason.ALREADY_CONSUMED, event=event
+                )
             except FingerlyAPIError as error:
                 if is_not_found(error):
-                    return VerifyResult(ok=False, reason="not_found")
+                    return VerifyResult(ok=False, reason=VerifyReason.NOT_FOUND)
                 raise
-        return VerifyResult(ok=True, reason="", event=event)
+        return VerifyResult(ok=True, reason=VerifyReason.OK, event=event)
 
     def list(
         self,
@@ -250,7 +253,8 @@ class Events:
             page: 1-based page number.
             limit: Rows per page, at most 200.
             visitor: Restrict to one exact visitor id.
-            level: Restrict to ``low``, ``medium`` or ``high``.
+            level: Restrict to ``low``, ``medium`` or ``high``; a
+                :class:`SuspectLevel` member works too.
 
         Raises:
             TypeError: If a bound, page or limit is unusable.
@@ -293,7 +297,7 @@ class AsyncEvents:
             payload = await self._client._request(path)
         except FingerlyAPIError as error:
             if is_not_found(error):
-                return VerifyResult(ok=False, reason="not_found")
+                return VerifyResult(ok=False, reason=VerifyReason.NOT_FOUND)
             raise
         event, occurred = parse_verified_event(payload)
         reason = failed_check(event, occurred, _now(), max_age_seconds, tag)
@@ -303,12 +307,14 @@ class AsyncEvents:
             try:
                 await self._client._request(path + "/consume", method="POST")
             except FingerlyEventAlreadyConsumedError:
-                return VerifyResult(ok=False, reason="already_consumed", event=event)
+                return VerifyResult(
+                    ok=False, reason=VerifyReason.ALREADY_CONSUMED, event=event
+                )
             except FingerlyAPIError as error:
                 if is_not_found(error):
-                    return VerifyResult(ok=False, reason="not_found")
+                    return VerifyResult(ok=False, reason=VerifyReason.NOT_FOUND)
                 raise
-        return VerifyResult(ok=True, reason="", event=event)
+        return VerifyResult(ok=True, reason=VerifyReason.OK, event=event)
 
     async def list(
         self,
