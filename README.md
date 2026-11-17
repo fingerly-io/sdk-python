@@ -71,7 +71,7 @@ import os
 
 from flask import Flask, abort, request
 
-from fingerly import verify_webhook
+from fingerly import WebhookEventType, verify_webhook
 
 app = Flask(__name__)
 
@@ -86,7 +86,8 @@ def fingerly_webhook():
     ):
         abort(400)
     delivery = request.get_json()
-    print(delivery["type"])
+    if delivery["type"] == WebhookEventType.VISITOR_SUSPECT:
+        print(delivery["data"])
     return "", 204
 ```
 
@@ -151,7 +152,16 @@ The archived `document` arrives moments after the event itself, so check `has_do
 - `ip_network` is the network the request came from (an IPv4 /24 or an IPv6 /40, such as `203.0.113.0/24`); the API never returns the address.
 - When a submission is unidentifiable (`event.identifiable is False`, such as insufficient entropy, a genuine embedded WebView, or an unmatched high-risk Web payload), `event.visitor_id` is `""`. There are no `deferred_token`, `deferred_signals` or `supplements` fields in `v: 3`.
 - `document`, when available, is an allow-listed view of the archived request with no raw signals, user agent or address. `event.parse_document()` decodes it into a typed `EventDocument` (including `attestation: Optional[Attestation]`). A native `Attestation` also carries `attest_skipped` (the app's reason for sending no proof) and `downgrade` (the report named an install an attested device owns).
-- `SIGNAL_NAMES` lists the canonical signal identifiers, including the `v: 3` anti-spoofing and integrity signals `"attestation_failed"`, `"attestation_downgrade"`, `"device_inconsistent"`, `"report_incomplete"`, `"probe_errors"`, `"fetch_metadata_missing"`, `"web_ticket_missing"`, `"web_ticket_invalid"`, `"tampering"`, `"custom_root_ca"` and `"secondary_user_profile"`.
+- `suspect_level`, `state`, `environment`, each trigger's `signal` and `confidence`, and an `Attestation`'s `state`, `status` and `attest_skipped` hold the string the API sent. Compare them with the matching enum: `SuspectLevel`, `EventState`, `Environment`, `Signal`, `Confidence`, `AttestationState`, `AttestationStatus` and `AttestSkippedReason`. Every member is a `str` equal to its value, so `event.suspect_level == SuspectLevel.HIGH` and `Signal.FINGERPRINT_SUPPRESSED in signals` work on plain strings, and a value a newer server adds still parses. Compare rather than convert: `SuspectLevel(value)` raises `ValueError` for a value this release does not know.
+- `Signal` names every signal group and detector, including the `v: 3` anti-spoofing and integrity signals `ATTESTATION_FAILED`, `ATTESTATION_DOWNGRADE`, `DEVICE_INCONSISTENT`, `REPORT_INCOMPLETE`, `PROBE_ERRORS`, `FETCH_METADATA_MISSING`, `WEB_TICKET_MISSING`, `WEB_TICKET_INVALID`, `TAMPERING`, `CUSTOM_ROOT_CA` and `SECONDARY_USER_PROFILE`. `SIGNAL_NAMES` holds the same values as plain strings.
+
+```python
+from fingerly import Signal, SuspectLevel
+
+signals = [trigger.signal for trigger in event.triggers]
+if event.suspect_level == SuspectLevel.HIGH or Signal.FINGERPRINT_SUPPRESSED in signals:
+    send_to_review(event)
+```
 - `suspect_score` is `None` when the request was not scored, and must not be treated as zero.
 - `project_id` is the UUID string of the Fingerly project the event belongs to, on both `events.get` and the rows of `events.list`; it is `None` when an older server does not send it.
 - `Event` declares every documented field as an attribute and falls back to the decoded body for fields added later, so a new server field needs no SDK upgrade.
@@ -164,24 +174,28 @@ The archived `document` arrives moments after the event itself, so check `has_do
 
 Send the browser's `requestId` to your server and verify it there with a server-only key. `fingerly.events.verify` reads the event and runs these checks in order, stopping at the first that fails:
 
-| Order | Reason | Fails when |
-| --- | --- | --- |
-| 1 | `not_found` | The event does not exist for this key's environment. |
-| 2 | `too_old` | It occurred more than `max_age_seconds` ago (300 by default). A missing or unreadable `occurred_at` fails too. |
-| 3 | `tag_mismatch` | You passed `tag` and the event's tag is not exactly that. |
-| 4 | `unidentifiable` | The event has no visitor id. |
-| 5 | `unscored` | The event has no `suspect_score`. |
-| 6 | `already_consumed` | The event was consumed before. |
+| Order | Reason | `VerifyReason` | Fails when |
+| --- | --- | --- | --- |
+| 1 | `not_found` | `NOT_FOUND` | The event does not exist for this key's environment. |
+| 2 | `too_old` | `TOO_OLD` | It occurred more than `max_age_seconds` ago (300 by default). A missing or unreadable `occurred_at` fails too. |
+| 3 | `tag_mismatch` | `TAG_MISMATCH` | You passed `tag` and the event's tag is not exactly that. |
+| 4 | `unidentifiable` | `UNIDENTIFIABLE` | The event has no visitor id. |
+| 5 | `unscored` | `UNSCORED` | The event has no `suspect_score`. |
+| 6 | `already_consumed` | `ALREADY_CONSUMED` | The event was consumed before. |
 
-Consumption comes last, only when every other check passed, so one event backs one decision: a replayed `requestId` answers `already_consumed`. Pass `consume=False` to check without consuming. The result is a `VerifyResult` with `ok`, `reason` (`""` when `ok`) and `event` (`None` only for `not_found`).
+Consumption comes last, only when every other check passed, so one event backs one decision: a replayed `requestId` answers `already_consumed`. Pass `consume=False` to check without consuming. The result is a `VerifyResult` with `ok`, `reason` (a `VerifyReason`, `VerifyReason.OK` or `""` when `ok`, and equal to the strings above otherwise) and `event` (`None` only for `not_found`).
 
 `verify` never judges the score: that policy stays with you. Check `suspect_level` or `suspect_score` after `ok`.
 
 ```python
+from fingerly import SuspectLevel, VerifyReason
+
 result = fingerly.events.verify(request_id, tag="checkout")
-if not result.ok:
+if result.reason == VerifyReason.ALREADY_CONSUMED:
+    refuse_replay()
+elif not result.ok:
     refuse(result.reason)
-elif result.event.suspect_level == "high":
+elif result.event.suspect_level == SuspectLevel.HIGH:
     send_to_review(result.event)
 else:
     allow()
@@ -234,7 +248,7 @@ A `503` or a transport failure leaves the token held, and the SDK retries the id
 
 The example under [Getting started](#getting-started) verifies a delivery in Flask.
 
-`identification.completed` and `visitor.suspect` deliveries carry the event's project as `data["project_id"]`; `identification.refused` carries it only when the refused request named a known key. The SDK passes the payload through unmodelled, so read it from the parsed JSON.
+`identification.completed` and `visitor.suspect` deliveries carry the event's project as `data["project_id"]`; `identification.refused` carries it only when the refused request named a known key. The SDK passes the payload through unmodelled, so read it from the parsed JSON. Compare its `type` with `WebhookEventType` (`IDENTIFICATION_COMPLETED`, `IDENTIFICATION_REFUSED`, `VISITOR_SUSPECT`, `BILLING_STATUS_CHANGED`, `USAGE_DAILY_SETTLED`, and `WEBHOOK_TEST` from **Send test event**), and ignore types you do not handle.
 
 Verify the exact raw bytes before JSON parsing. Signatures cover the timestamp and body. The default replay tolerance is 300 seconds; persist processed webhook IDs to deduplicate deliveries. During signing-secret rotation, any matching signature in the comma-separated header is accepted; only the first 32 are read. The function never raises for malformed input: bad input is a failed verification, not an exception.
 
@@ -609,7 +623,7 @@ The vendored synthetic contract snapshot makes tests independent of sibling repo
 <details>
 <summary>Source structure</summary>
 
-`_client.py` holds both clients and their event reads. `_http.py` is the connection pool both clients and the proxy send through, with its deadline and body cap. `_transport.py` builds requests and interprets responses, so the two clients share one definition of what a request is and what a failure means. `_models.py` owns `Event`, `EventPage` and their parsing. `_webhooks.py` verifies signatures. `_proxy.py` owns every proxy decision, with `_asgi.py` and `_wsgi.py` as thin adapters that only read a request and write a response, so the two standards cannot drift apart. `_config.py` validates every caller-supplied option: keys, origins, API versions and durations, all before any network access. `_errors.py` holds the exception hierarchy. `_version.py` holds the version everything else reads. `__init__.py` only exposes the public API.
+`_client.py` holds both clients and their event reads. `_http.py` is the connection pool both clients and the proxy send through, with its deadline and body cap. `_transport.py` builds requests and interprets responses, so the two clients share one definition of what a request is and what a failure means. `_models.py` owns `Event`, `EventPage` and their parsing. `_enums.py` holds the string enums the models and webhooks compare against. `_webhooks.py` verifies signatures. `_proxy.py` owns every proxy decision, with `_asgi.py` and `_wsgi.py` as thin adapters that only read a request and write a response, so the two standards cannot drift apart. `_config.py` validates every caller-supplied option: keys, origins, API versions and durations, all before any network access. `_errors.py` holds the exception hierarchy. `_version.py` holds the version everything else reads. `__init__.py` only exposes the public API.
 
 </details>
 
