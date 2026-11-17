@@ -40,11 +40,10 @@ def _objects() -> list[Any]:
     reader = Fingerly(secret_key=SECRET_KEY)
     areader = AsyncFingerly(secret_key=SECRET_KEY)
     proxy = FingerlyProxy(proxy_key=PROXY_KEY, client_ip=lambda r: "203.0.113.1")
-    legacy = FingerlyProxy(secret_key=SECRET_KEY, client_ip=lambda r: "203.0.113.1")
-    return [reader, reader.events, areader, proxy, proxy.asgi, proxy.wsgi, legacy]
+    return [reader, reader.events, areader, proxy, proxy.asgi, proxy.wsgi]
 
 
-@pytest.mark.parametrize("index", range(7))
+@pytest.mark.parametrize("index", range(6))
 def test_no_object_shows_a_credential(index: int) -> None:
     value = _objects()[index]
     dumped = _state(value)

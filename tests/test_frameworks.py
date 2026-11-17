@@ -108,8 +108,16 @@ class TestStarlette:
         assert str(forwarded.url) == INGEST
         assert forwarded.headers["x-fingerly-client-ip"] == "203.0.113.5"
         assert forwarded.headers["x-fingerly-proxy-key"] == PROXY_KEY
-        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.2.0"
+        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.3.0"
         assert "cookie" not in forwarded.headers
+
+        (missing_origin,) = self.post(
+            app,
+            [PATH],
+            headers={"x-api-key": PUBLIC_KEY, "cf-connecting-ip": "203.0.113.5"},
+        )
+        assert missing_origin.status_code == 400
+        assert missing_origin.json()["error"]["code"] == "missing_origin"
 
     def test_a_mount_at_the_issued_path_answers_nothing(self) -> None:
         # Starlette redirects the bare mount path to its slashed form, and the
@@ -176,16 +184,36 @@ class TestFlask:
 
     def test_forwards_beside_the_host_app(self) -> None:
         upstream = Upstream()
+        raw_v3 = b'{"v":3,"signals":{"latency":142.50}}'
         with self.flask_client(build(upstream)) as client:
-            identified = client.post(
-                PATH, headers=BROWSER_HEADERS, content=b'{"signals":{}}'
+            identified = client.post(PATH, headers=BROWSER_HEADERS, content=raw_v3)
+            native = client.post(
+                PATH,
+                headers={
+                    "x-api-key": PUBLIC_KEY,
+                    "cf-connecting-ip": "203.0.113.5",
+                    "x-fingerly-sdk-platform": "android",
+                    "idempotency-key": "idem-flask-v3-0001",
+                },
+                content=raw_v3,
             )
-            reported = client.post(
-                PATH, headers=BROWSER_HEADERS, content=b'{"token":"deferred"}'
+            missing_origin = client.post(
+                PATH,
+                headers={
+                    "x-api-key": PUBLIC_KEY,
+                    "cf-connecting-ip": "203.0.113.5",
+                },
+                content=raw_v3,
+            )
+            supplement = client.post(
+                PATH + "/supplement", headers=BROWSER_HEADERS, content=raw_v3
             )
             home = client.get("/")
 
-        assert (identified.status_code, reported.status_code) == (200, 200)
+        assert (identified.status_code, native.status_code) == (200, 200)
+        assert missing_origin.status_code == 400
+        assert missing_origin.json()["error"]["code"] == "missing_origin"
+        assert supplement.status_code == 404
         assert identified.json() == {"request_id": "identified"}
         assert identified.headers["cache-control"] == "no-store"
         assert_relays_nothing_naming_fingerly(identified)
@@ -194,9 +222,14 @@ class TestFlask:
 
         assert [str(request.url) for request in upstream.requests] == [INGEST] * 2
         forwarded = upstream.requests[0]
+        assert forwarded.content == raw_v3
         assert forwarded.headers["x-fingerly-client-ip"] == "203.0.113.5"
-        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.2.0"
+        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.3.0"
         assert "cookie" not in forwarded.headers
+        native_forwarded = upstream.requests[1]
+        assert native_forwarded.content == raw_v3
+        assert native_forwarded.headers["x-fingerly-sdk-platform"] == "android"
+        assert "x-fingerly-origin" not in native_forwarded.headers
 
     def test_forwards_from_a_deployment_under_a_sub_uri(self) -> None:
         # DispatcherMiddleware rather than httpx's script_name, because httpx

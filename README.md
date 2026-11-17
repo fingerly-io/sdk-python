@@ -32,7 +32,7 @@ Two clients share one API: `Fingerly` for synchronous code such as Django and Fl
 **2. Install.**
 
 ```sh
-pip install fingerly
+pip install "fingerly>=0.3.0"
 ```
 
 **3. Read an event.**
@@ -98,7 +98,9 @@ Full documentation: [docs.fingerly.io/docs/sdks/python](https://docs.fingerly.io
 
 | I want to | Go to |
 | --- | --- |
-| Read an event, or verify a backend action | [Read events](#read-events) |
+| Read an event | [Read events](#read-events) |
+| Verify and consume an event before a backend action | [Verify a backend action](#verify-a-backend-action) |
+| Read or write an iOS device's DeviceCheck bits | [Read and write Apple DeviceCheck bits](#read-and-write-apple-devicecheck-bits) |
 | Check a webhook signature | [Verify webhooks](#verify-webhooks) |
 | Keep identification working behind content blockers | [First-party proxy](#first-party-proxy) |
 | Mount the proxy in FastAPI, Django or Flask | [Framework guides](#framework-guides) |
@@ -107,6 +109,7 @@ Full documentation: [docs.fingerly.io/docs/sdks/python](https://docs.fingerly.io
 ## Contents
 
 - [Read events](#read-events)
+- [Read and write Apple DeviceCheck bits](#read-and-write-apple-devicecheck-bits)
 - [Verify webhooks](#verify-webhooks)
 - [First-party proxy](#first-party-proxy)
 - [Framework guides](#framework-guides)
@@ -121,7 +124,7 @@ Full documentation: [docs.fingerly.io/docs/sdks/python](https://docs.fingerly.io
 
 ## Read events
 
-Event reads require `fly_sk_{production|staging|development}_…` keys. Requests go to `https://api.fingerly.io`; `endpoint` overrides that for a local API. Public, proxy, management, malformed and unsupported keys are rejected before network access. Requests do not follow redirects. `get` and `list` each perform one request and never retry.
+Event reads require `fly_sk_{production|staging|development}_…` keys. Requests go to `https://api.fingerly.io`; `endpoint` overrides that for a local API. `endpoint` takes a scheme, a host and an optional port and nothing else: a path, query, fragment, credentials, space or control character is refused when the client is built. It must be `https`. Plain `http` is accepted only for `127.0.0.1`, `localhost` or `[::1]`, and only with `allow_insecure_loopback=True`, which is meant for local development and tests. Public, proxy, management, malformed and unsupported keys are rejected before network access. Requests do not follow redirects. `get` and `list` each perform one request and never retry.
 
 | | `Fingerly` | `AsyncFingerly` |
 | --- | --- | --- |
@@ -141,12 +144,14 @@ Send the `requestId` the browser SDK returned to your server and read it there w
 | `event_pending` | `FingerlyEventPendingError`, a `FingerlyAPIError` | The request id was accepted but its event is not recorded yet. It is not a verdict. Try again after `retry_after` seconds, or verify asynchronously, for example from a webhook. The SDK never retries on its own. |
 | `event_not_found` | a plain `FingerlyAPIError` | The request id was never issued for this key's environment, or the event is past the 30-day retention. |
 
-The archived `document` arrives moments after the event itself, so check `has_document` rather than assuming it is there.
+The archived `document` arrives moments after the event itself, so check `has_document` rather than assuming it is there, and call `event.parse_document()` when you want a typed `EventDocument`.
 
 ### Event fields
 
 - `ip_network` is the network the request came from (an IPv4 /24 or an IPv6 /40, such as `203.0.113.0/24`); the API never returns the address.
-- `document`, when available, is an allow-listed view of the archived request with no raw signals, user agent or address.
+- When a submission is unidentifiable (`event.identifiable is False`, such as insufficient entropy, a genuine embedded WebView, or an unmatched high-risk Web payload), `event.visitor_id` is `""`. There are no `deferred_token`, `deferred_signals` or `supplements` fields in `v: 3`.
+- `document`, when available, is an allow-listed view of the archived request with no raw signals, user agent or address. `event.parse_document()` decodes it into a typed `EventDocument` (including `attestation: Optional[Attestation]`). A native `Attestation` also carries `attest_skipped` (the app's reason for sending no proof) and `downgrade` (the report named an install an attested device owns).
+- `SIGNAL_NAMES` lists the canonical signal identifiers, including the `v: 3` anti-spoofing and integrity signals `"attestation_failed"`, `"attestation_downgrade"`, `"device_inconsistent"`, `"report_incomplete"`, `"probe_errors"`, `"fetch_metadata_missing"`, `"web_ticket_missing"`, `"web_ticket_invalid"`, `"tampering"`, `"custom_root_ca"` and `"secondary_user_profile"`.
 - `suspect_score` is `None` when the request was not scored, and must not be treated as zero.
 - `project_id` is the UUID string of the Fingerly project the event belongs to, on both `events.get` and the rows of `events.list`; it is `None` when an older server does not send it.
 - `Event` declares every documented field as an attribute and falls back to the decoded body for fields added later, so a new server field needs no SDK upgrade.
@@ -157,7 +162,73 @@ The archived `document` arrives moments after the event itself, so check `has_do
 
 ### Verify a backend action
 
-Read the event with a server-only key. Check that its tag matches your action, that it is recent, that its environment is correct, and that it was scored. Apply your own policy to the server's verdict. Do not authorize an action using scores or visitor identifiers supplied by the browser. Tags correlate events; they do not replace your application's authentication or replay protection. A tag must never hold a personal identifier, such as a user ID, email, install ID or advertising ID, because the server keeps tags in long-lived rollups. A `FingerlyEventPendingError` means the server has not decided yet: retry after `retry_after` seconds or verify asynchronously, and do not refuse the action as fraud on that answer alone. The framework guides below answer it with `503` and `Retry-After`.
+Send the browser's `requestId` to your server and verify it there with a server-only key. `fingerly.events.verify` reads the event and runs these checks in order, stopping at the first that fails:
+
+| Order | Reason | Fails when |
+| --- | --- | --- |
+| 1 | `not_found` | The event does not exist for this key's environment. |
+| 2 | `too_old` | It occurred more than `max_age_seconds` ago (300 by default). A missing or unreadable `occurred_at` fails too. |
+| 3 | `tag_mismatch` | You passed `tag` and the event's tag is not exactly that. |
+| 4 | `unidentifiable` | The event has no visitor id. |
+| 5 | `unscored` | The event has no `suspect_score`. |
+| 6 | `already_consumed` | The event was consumed before. |
+
+Consumption comes last, only when every other check passed, so one event backs one decision: a replayed `requestId` answers `already_consumed`. Pass `consume=False` to check without consuming. The result is a `VerifyResult` with `ok`, `reason` (`""` when `ok`) and `event` (`None` only for `not_found`).
+
+`verify` never judges the score: that policy stays with you. Check `suspect_level` or `suspect_score` after `ok`.
+
+```python
+result = fingerly.events.verify(request_id, tag="checkout")
+if not result.ok:
+    refuse(result.reason)
+elif result.event.suspect_level == "high":
+    send_to_review(result.event)
+else:
+    allow()
+```
+
+`AsyncFingerly` has the same call as a coroutine. An invalid option (a `max_age_seconds` that is not a positive integer, an empty `tag`) raises `TypeError` before anything is sent. `fingerly.events.consume(request_id)` consumes an event on its own: the first call answers a `ConsumeResult` with `first=True`, and every later one raises `FingerlyEventAlreadyConsumedError`, a `FingerlyAPIError` whose `consumed_at` says when. Neither call is retried.
+
+Do not authorize an action using scores or visitor identifiers supplied by the browser. Tags correlate events; they do not replace your application's authentication. A tag must never hold a personal identifier, such as a user ID, email, install ID or advertising ID, because the server keeps tags in long-lived rollups. `verify` raises every error other than `event_not_found` and `event_already_consumed`. A `FingerlyEventPendingError` means the server has not decided yet: retry after `retry_after` seconds or verify asynchronously, and do not refuse the action as fraud on that answer alone. The framework guides below answer it with `503` and `Retry-After`.
+
+## Read and write Apple DeviceCheck bits
+
+For an iOS identification whose App Attest evidence carried a DeviceCheck token, Fingerly holds the token for one hour, and a secret key of the same project and environment can spend it once: to read the device's two bits from Apple, or to set them. The bits mean what you decide; Fingerly never stores or reads them.
+
+Apple treats a DeviceCheck token as single-use, so a read and a write each need their own identification. A once-per-device free trial takes two:
+
+1. Query on the identification that asks for the trial. If the bit says the device already had one, refuse it.
+2. Otherwise grant the trial and record the grant in your own data.
+3. Write the bit on the next identification from that install. Until the write lands, your own record of the grant is what stops a second trial.
+
+```python
+from fingerly import FingerlyDeviceCheckError
+
+# The identification that asks for the trial.
+try:
+    bits = fingerly.device_check.query(request_id)
+    used_on_device = bits.found and bits.bit0
+except FingerlyDeviceCheckError as error:
+    if error.code not in ("device_check_not_held", "device_check_spent"):
+        raise
+    used_on_device = False  # no answer, not a verdict
+
+# The next identification, after you recorded the grant.
+fingerly.device_check.write(next_request_id, bit0=True)
+```
+
+`AsyncFingerly` has the same calls as coroutines. `write` sends only the bits you name; naming neither raises `TypeError` before anything is sent.
+
+Every non-2xx answer raises `FingerlyDeviceCheckError` (a `FingerlyAPIError`); branch on `code`:
+
+| Status | `code` |
+| --- | --- |
+| `404` | `device_check_not_held` |
+| `409` | `device_check_spent`, `device_check_busy` or `credential_unavailable` |
+| `422` | `bits_required` or `apple_rejected` (with Apple's HTTP status in `apple_status`) |
+| `503` | `device_check_unavailable` |
+
+A `503` or a transport failure leaves the token held, and the SDK retries the identical request, at most twice. A held token kept for a retry accepts only the request it was first used for: a retry with the other operation or other bits answers `409 device_check_spent`. No other answer is retried.
 
 ## Verify webhooks
 
@@ -208,22 +279,29 @@ The [framework guides](#framework-guides) show each in full.
 
 ### What the proxy does
 
-The browser SDK posts both of its calls, the identification and the report that follows it, to that one path. The proxy forwards each, as it is, to Fingerly's one ingest URL, `https://api.fingerly.io/api/v1/ingest`, and to nothing else. A path other than the configured one gets `404`, and any method but `POST` gets `405`. Event reads need a secret key and stay unreachable from a browser by construction.
+Browser and proxied native client SDKs post a single `v: 3` identification envelope to that one path. The proxy forwards its raw request body bytes verbatim (without JSON decoding or re-serialising) to Fingerly's one ingest URL, `https://api.fingerly.io/api/v1/ingest`, and to nothing else. Event reads need a secret key and stay unreachable from a browser by construction.
 
 | Situation | Answer |
 | --- | --- |
-| Path other than the configured one | `404` |
-| Method other than `POST` | `405` |
-| Public key from a different environment than the proxy key | `401` |
+| Path other than the configured one (`/supplement` subpaths included) | `404` |
+| Method other than `POST` (plus `OPTIONS` when `allowed_origins` is configured), matched exactly, so `post` gets `405` too | `405` |
+| No public key from the same environment as the proxy key | `401`, nothing forwarded |
+| Neither `Origin` nor a validated `x-fingerly-sdk-platform` | `400` (`missing_origin`) |
 | Body over 1 MiB (enforced while streaming rather than after buffering) | `413` |
 | WSGI body the server cannot read, such as broken chunked framing | `400` |
 | Fingerly cannot be reached in time | `504 Gateway timeout` |
-| Any other upstream failure: a refused connection, a malformed or truncated response, or one over 4 MiB | `502 Bad gateway` |
+| Any other upstream failure: a refused connection, a malformed or truncated response, one over 4 MiB, an upstream redirect or a status outside 200 to 599 | `502 Bad gateway` |
 | `client_ip` callback returns no valid address | `500` with the one line `The client IP callback returned no valid address` |
 
-The browser must present a public key from the same environment as the proxy key, or the request gets `401`. Responses are marked `no-store`. The `504` and `502` answers are short plain text marked `no-store`, and each writes one line, with no stack trace, to the `fingerly.proxy` logger.
+Responses are marked `no-store`. A redirect is never followed, whatever transport you supply. The `504` and `502` answers are short plain text marked `no-store`, and each writes one line, with no stack trace, to the `fingerly.proxy` logger. The line names the kind of failure only, never the upstream address or a key.
 
-Only the content type, the visitor metadata Fingerly needs, and an `idempotency-key` are forwarded. Customer cookies and authorization headers are never passed on. The proxy reports itself upstream as `python/<version>` in `x-fingerly-proxy-version`, which the dashboard shows per proxy, and sends `fingerly-python/<version>` as its user agent.
+### Keys and headers
+
+`proxy_key` is required, and a missing or malformed one fails when the proxy is built. The caller must present a public key (`fly_pk_…`) from the same environment as the proxy key, or the request gets `401` and nothing is forwarded. Upstream, the proxy sends that public key as `X-API-Key` and its own proxy key as `X-Fingerly-Proxy-Key`; a secret key is never part of the proxy.
+
+Incoming headers follow the sanitize-and-restore sequence: all incoming `x-fingerly-*`, `cookie` and `authorization` headers are stripped, restoring `x-fingerly-sdk-platform` only when it matches an exact lowercase native or bridge platform (`ios`, `android`, `react-native`, `react-native-ios`, `react-native-android`, `flutter`, `flutter-ios`, `flutter-android`, `lynx-ios`, `lynx-android`, `capacitor`, `kotlin-multiplatform`). Requests carrying neither `Origin` nor a validated `x-fingerly-sdk-platform` are rejected locally with `400` (`missing_origin`), and `x-fingerly-origin` is never synthesized from `Host`, `Referer` or the request URL. Exactly one channel goes upstream: a request with an `Origin` is forwarded as a browser call with `x-fingerly-origin` and without the platform header, as the API treats the same request sent to it directly.
+
+Alongside verified proxy metadata (`x-fingerly-host` included), only `content-type`, `x-api-key`, `user-agent`, `idempotency-key`, `sec-fetch-*` and `sec-ch-ua-*` are forwarded. Customer cookies and authorization headers are never passed on. The proxy reports itself upstream as `python/0.3.0` in `x-fingerly-proxy-version`, which the dashboard shows per proxy, and sends `fingerly-python/0.3.0` as its user agent.
 
 Back to the browser it relays only `content-type`, `x-request-id`, `ratelimit-limit`, `ratelimit-remaining` and `retry-after`, plus its own `cache-control: no-store` and a `content-length` for the decoded body. A content blocker can match a response header by name, so an allowlist is what keeps anything naming Fingerly off the page.
 
@@ -251,6 +329,20 @@ Taking the application-relative path rather than the whole one is what makes a s
 ### Closing the proxy
 
 The proxy opens its upstream connections on first use, one pool per standard. Close whichever you used when your app shuts down: `proxy.close()` for WSGI, `await proxy.aclose()` for ASGI. A WSGI process can simply exit.
+
+### Testing against a local API
+
+`upstream` replaces the API origin for testing against a local API. It takes a scheme, a host and an optional port and nothing else: a path, query, fragment, credentials, space or control character is refused when the proxy is built. It must be `https`. Plain `http` is accepted only for `127.0.0.1`, `localhost` or `[::1]`, and only with `allow_insecure_loopback=True`, which is meant for local development and tests:
+
+```python
+proxy = FingerlyProxy(
+    proxy_key=os.environ["FINGERLY_PROXY_KEY"],
+    path="/k7x2qm4a",
+    client_ip=lambda request: request.peer_host,
+    upstream="http://127.0.0.1:8080",
+    allow_insecure_loopback=True,
+)
+```
 
 ## Framework guides
 
@@ -313,7 +405,11 @@ async def verify(request_id: str, request: Request):
         raise HTTPException(503, headers={"Retry-After": retry_after}) from None
     except FingerlyAPIError as error:
         raise HTTPException(404 if error.status == 404 else 502) from None
-    return {"visitor_id": event.visitor_id, "suspect_score": event.suspect_score}
+    return {
+        "identifiable": event.identifiable,
+        "visitor_id": event.visitor_id,
+        "suspect_score": event.suspect_score,
+    }
 ```
 
 </details>
@@ -407,7 +503,11 @@ def verify(request, request_id):
         status = 404 if error.status == 404 else 502
         return JsonResponse({"error": error.code}, status=status)
     return JsonResponse(
-        {"visitor_id": event.visitor_id, "suspect_score": event.suspect_score}
+        {
+            "identifiable": event.identifiable,
+            "visitor_id": event.visitor_id,
+            "suspect_score": event.suspect_score,
+        }
     )
 ```
 
@@ -465,7 +565,11 @@ def verify(request_id):
         return {"error": error.code}, 503, {"Retry-After": retry_after}
     except FingerlyAPIError as error:
         abort(404 if error.status == 404 else 502)
-    return {"visitor_id": event.visitor_id, "suspect_score": event.suspect_score}
+    return {
+        "identifiable": event.identifiable,
+        "visitor_id": event.visitor_id,
+        "suspect_score": event.suspect_score,
+    }
 ```
 
 </details>

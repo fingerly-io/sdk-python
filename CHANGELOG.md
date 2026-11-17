@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.3.0
+
+- Added `fingerly.events.verify(request_id, max_age_seconds=300, tag=None,
+  consume=True)`, on `Fingerly` and `AsyncFingerly`, which reads an event and
+  checks it exists, is recent, carries the expected `tag`, is identifiable and
+  scored, then consumes it once, answering a `VerifyResult`; and
+  `fingerly.events.consume(request_id)`, answering a `ConsumeResult` or raising
+  `FingerlyEventAlreadyConsumedError` with `consumed_at`.
+- Added `fingerly.device_check.query(request_id)` and
+  `fingerly.device_check.write(request_id, bit0=None, bit1=None)`, on
+  `Fingerly` and `AsyncFingerly`, which spend the DeviceCheck token held for
+  an iOS event to read or set the device's two bits. Answers are
+  `DeviceCheckBits` and `DeviceCheckWriteResult`; errors raise
+  `FingerlyDeviceCheckError` with the API `code` and, on `apple_rejected`,
+  `apple_status`. A `503` or a transport failure is retried with the identical
+  request.
+- Refreshed the vendored v3 OpenAPI and contract fixtures, removing retired
+  deferred supplement schemas and routes, and added `Event.reason`,
+  `Event.url_host`, `Event.url_path`, `Event.identifiable`,
+  `Event.parse_document()`, `EventDocument`, `Attestation`, and `SIGNAL_NAMES`
+  covering all v3 signals (`attestation_failed`, `attestation_downgrade`,
+  `device_inconsistent`, `report_incomplete`, `probe_errors`,
+  `fetch_metadata_missing`, `web_ticket_missing`, `web_ticket_invalid`,
+  `tampering`, `custom_root_ca`, `secondary_user_profile`), with `attest_skipped` and `downgrade` on
+  `Attestation`.
+- Updated `FingerlyProxy` (ASGI and WSGI) to enforce the single-path
+  `proxy.md` relay contract: sanitize-and-restore validation of
+  `x-fingerly-sdk-platform`, rejection with HTTP `400` (`missing_origin`) when
+  both `Origin` and a valid `x-fingerly-sdk-platform` are absent (never
+  synthesising `x-fingerly-origin`), forwarding of `Sec-Fetch-*` and
+  `Sec-CH-UA-*` client metadata headers, optional cross-origin
+  `allowed_origins` CORS handling, and verbatim raw-byte forwarding.
+- `FingerlyProxy` requires `proxy_key`, checks the browser's same-environment
+  public key on every request, and never sends a secret key upstream.
+
 ## 0.2.0
 
 - `Event.project_id` is the Fingerly project an event belongs to, on single

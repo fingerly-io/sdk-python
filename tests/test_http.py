@@ -121,7 +121,12 @@ class TestDeadline:
         self, upstream: Upstream
     ) -> None:
         upstream.mode = "trickle"
-        with Fingerly(secret_key=SECRET_KEY, endpoint=upstream.url, timeout=0.5) as f:
+        with Fingerly(
+            secret_key=SECRET_KEY,
+            endpoint=upstream.url,
+            timeout=0.5,
+            allow_insecure_loopback=True,
+        ) as f:
             started = time.monotonic()
             with pytest.raises(FingerlyTimeoutError):
                 f.events.get("id")
@@ -134,7 +139,10 @@ class TestDeadline:
 
         async def read() -> float:
             async with AsyncFingerly(
-                secret_key=SECRET_KEY, endpoint=upstream.url, timeout=0.5
+                secret_key=SECRET_KEY,
+                endpoint=upstream.url,
+                timeout=0.5,
+                allow_insecure_loopback=True,
             ) as f:
                 started = time.monotonic()
                 with pytest.raises(FingerlyTimeoutError):

@@ -16,7 +16,12 @@ from urllib.parse import quote
 import httpx
 
 from ._config import REDACTED, Secret, positive_int
-from ._errors import FingerlyAPIError, FingerlyEventPendingError
+from ._errors import (
+    FingerlyAPIError,
+    FingerlyDeviceCheckError,
+    FingerlyEventAlreadyConsumedError,
+    FingerlyEventPendingError,
+)
 from ._version import __version__
 
 #: Sent on every request so events record which SDK build made them.
@@ -53,7 +58,13 @@ def event_path(request_id: str) -> str:
 
     Args:
         request_id: The ``request_id`` returned by identification.
+
+    Raises:
+        TypeError: If the id is empty, which would address the event list
+            instead of one event. Nothing is sent.
     """
+    if not str(request_id):
+        raise TypeError("request_id must be a non-empty string")
     # quote() leaves dots alone and httpx removes a "." or ".." segment before
     # sending, so an id of "." would read the event list instead of one event.
     # The id usually comes from the browser.
@@ -187,11 +198,14 @@ def api_error(
     code: Optional[str] = None
     details: Any = None
     request_id: Optional[str] = None
+    payload: Any = None
     try:
         payload = json.loads(body)
         error = payload.get("error") if isinstance(payload, dict) else None
         if isinstance(error, dict) and isinstance(error.get("code"), str):
             code = _redact(error["code"], secret_key)
+        elif isinstance(payload, dict) and isinstance(payload.get("code"), str):
+            code = _redact(payload["code"], secret_key)
         if isinstance(error, dict) and error.get("details") is not None:
             # A JSON round-trip redacts nested values without walking the tree.
             details = json.loads(_redact(json.dumps(error["details"]), secret_key))
@@ -201,18 +215,117 @@ def api_error(
         # A non-JSON body still reports its HTTP status, and its contents are
         # deliberately dropped rather than surfaced.
         pass
+    message = f"Fingerly API returned HTTP {status}"
+    seconds = retry_after_seconds(retry_after)
+    if status == 409 and code == "event_already_consumed":
+        consumed_at = _consumed_at(payload)
+        return FingerlyEventAlreadyConsumedError(
+            message,
+            status,
+            code=code,
+            details=details,
+            request_id=request_id,
+            retry_after=seconds,
+            consumed_at=_redact(consumed_at, secret_key) if consumed_at else None,
+        )
     error_class = (
         FingerlyEventPendingError
         if status == 404 and code == "event_pending"
         else FingerlyAPIError
     )
     return error_class(
-        f"Fingerly API returned HTTP {status}",
+        message,
         status,
         code=code,
         details=details,
         request_id=request_id,
-        retry_after=retry_after_seconds(retry_after),
+        retry_after=seconds,
+    )
+
+
+def _consumed_at(payload: Any) -> Optional[str]:
+    """Reads ``consumed_at`` from an ``event_already_consumed`` body.
+
+    It may sit at the top level, inside ``error``, or as an ``error.details``
+    entry whose ``field`` is ``consumed_at`` and whose ``issue`` is the time.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("consumed_at"), str):
+        return str(payload["consumed_at"])
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return None
+    if isinstance(error.get("consumed_at"), str):
+        return str(error["consumed_at"])
+    details = error.get("details")
+    if isinstance(details, list):
+        for detail in details:
+            if isinstance(detail, dict) and detail.get("field") == "consumed_at":
+                issue = detail.get("issue")
+                return issue if isinstance(issue, str) else None
+    return None
+
+
+def verify_options(max_age_seconds: int, tag: Optional[str], consume: bool) -> None:
+    """Validates the options of ``events.verify`` before anything is sent.
+
+    Raises:
+        TypeError: If ``max_age_seconds`` is not a positive integer, ``tag``
+            is not None or a non-empty string (an empty tag would match
+            untagged events), or ``consume`` is not a bool.
+    """
+    positive_int(max_age_seconds, "max_age_seconds")
+    if tag is not None and (not isinstance(tag, str) or not tag):
+        raise TypeError("tag must be None or a non-empty string")
+    if not isinstance(consume, bool):
+        raise TypeError("consume must be a bool")
+
+
+def is_not_found(error: FingerlyAPIError) -> bool:
+    """Whether an API error is ``404 event_not_found``, and nothing else."""
+    return error.status == 404 and error.code == "event_not_found"
+
+
+def device_check_body(bit0: Optional[bool], bit1: Optional[bool]) -> bytes:
+    """Builds a DeviceCheck write body, naming only the bits given.
+
+    Raises:
+        TypeError: If neither bit is given, or a bit is not a bool. Nothing is
+            sent, so the held token is not touched.
+    """
+    bits: dict[str, bool] = {}
+    for name, value in (("bit0", bit0), ("bit1", bit1)):
+        if value is None:
+            continue
+        if not isinstance(value, bool):
+            raise TypeError(f"{name} must be a bool or None")
+        bits[name] = value
+    if not bits:
+        raise TypeError("Name bit0, bit1 or both")
+    return json.dumps(bits, separators=(",", ":")).encode()
+
+
+def device_check_error(error: FingerlyAPIError) -> FingerlyDeviceCheckError:
+    """Re-types an API error from a DeviceCheck route, reading ``apple_status``."""
+    apple_status: Optional[int] = None
+    if error.code == "apple_rejected" and isinstance(error.details, list):
+        for detail in error.details:
+            if isinstance(detail, dict) and detail.get("field") == "apple_status":
+                issue = detail.get("issue")
+                if isinstance(issue, str) and issue.isdigit():
+                    apple_status = int(issue)
+                elif isinstance(issue, int) and not isinstance(issue, bool):
+                    apple_status = issue
+                break
+    return FingerlyDeviceCheckError(
+        str(error),
+        error.status,
+        code=error.code,
+        details=error.details,
+        request_id=error.request_id,
+        retry_after=error.retry_after,
+        apple_status=apple_status,
     )
 
 

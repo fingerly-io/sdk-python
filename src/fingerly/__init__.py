@@ -12,34 +12,67 @@ Example:
 
 from __future__ import annotations
 
-from ._client import AsyncEvents, AsyncFingerly, Events, Fingerly
+from ._client import (
+    AsyncDeviceCheck,
+    AsyncEvents,
+    AsyncFingerly,
+    DeviceCheck,
+    Events,
+    Fingerly,
+)
 from ._errors import (
     FingerlyAPIError,
     FingerlyConnectionError,
+    FingerlyDeviceCheckError,
     FingerlyError,
+    FingerlyEventAlreadyConsumedError,
     FingerlyEventPendingError,
     FingerlyTimeoutError,
 )
-from ._models import Event, EventPage, EventTrigger
+from ._models import (
+    SIGNAL_NAMES,
+    Attestation,
+    ConsumeResult,
+    DeviceCheckBits,
+    DeviceCheckWriteResult,
+    Event,
+    EventDocument,
+    EventPage,
+    EventTrigger,
+    VerifyReason,
+    VerifyResult,
+)
 from ._proxy import FingerlyProxy, ProxyRequest
 from ._version import __version__
 from ._webhooks import verify_webhook
 
 __all__ = [
+    "SIGNAL_NAMES",
+    "AsyncDeviceCheck",
     "AsyncEvents",
     "AsyncFingerly",
+    "Attestation",
+    "ConsumeResult",
+    "DeviceCheck",
+    "DeviceCheckBits",
+    "DeviceCheckWriteResult",
     "Event",
+    "EventDocument",
     "EventPage",
     "EventTrigger",
     "Events",
     "Fingerly",
     "FingerlyAPIError",
     "FingerlyConnectionError",
+    "FingerlyDeviceCheckError",
     "FingerlyError",
+    "FingerlyEventAlreadyConsumedError",
     "FingerlyEventPendingError",
     "FingerlyProxy",
     "FingerlyTimeoutError",
     "ProxyRequest",
+    "VerifyReason",
+    "VerifyResult",
     "__version__",
     "verify_webhook",
 ]

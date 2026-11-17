@@ -63,7 +63,13 @@ class TestDigitsThatAreNotNumbers:
         request = ProxyRequest(
             "POST",
             "/x",
-            Headers([("x-api-key", PUBLIC_KEY), ("content-length", "²")]),
+            Headers(
+                [
+                    ("x-api-key", PUBLIC_KEY),
+                    ("origin", "https://shop.test"),
+                    ("content-length", "²"),
+                ]
+            ),
         )
         assert proxy.screen(request).refusal is None
 
@@ -75,6 +81,7 @@ def _wsgi_call(proxy: FingerlyProxy, **environ: Any) -> tuple[str, bytes]:
         "REQUEST_METHOD": "POST",
         "PATH_INFO": "/x",
         "HTTP_X_API_KEY": PUBLIC_KEY,
+        "HTTP_ORIGIN": "https://shop.test",
         "REMOTE_ADDR": "203.0.113.7",
     }
     chunks = proxy.wsgi(
@@ -175,7 +182,10 @@ class TestVisitorWhoLeaves:
                 "raw_path": b"/x",
                 "root_path": "",
                 "query_string": b"",
-                "headers": [(b"x-api-key", PUBLIC_KEY.encode())],
+                "headers": [
+                    (b"x-api-key", PUBLIC_KEY.encode()),
+                    (b"origin", b"https://shop.test"),
+                ],
             }
             await app(scope, receive, send)
             return sent
@@ -198,7 +208,10 @@ class TestVisitorWhoLeaves:
                 "method": "POST",
                 "path": "/x",
                 "root_path": "",
-                "headers": [(b"x-api-key", PUBLIC_KEY.encode())],
+                "headers": [
+                    (b"x-api-key", PUBLIC_KEY.encode()),
+                    (b"origin", b"https://shop.test"),
+                ],
             }
             await proxy.asgi(scope, receive, send)
 
@@ -217,7 +230,13 @@ class TestHeaderValuesOnTheWire:
         request = ProxyRequest(
             "POST",
             "/x",
-            Headers([("x-api-key", PUBLIC_KEY), ("user-agent", "caf\udce9")]),
+            Headers(
+                [
+                    ("x-api-key", PUBLIC_KEY),
+                    ("origin", "https://shop.test"),
+                    ("user-agent", "caf\udce9"),
+                ]
+            ),
         )
         assert proxy.forward(proxy.screen(request), request, b"{}").status == 422
 
@@ -265,7 +284,7 @@ class TestEndpointsRefusedAtConstruction:
     def test_fails_before_any_request(self, endpoint: str) -> None:
         with pytest.raises(TypeError, match="endpoint must be"):
             Fingerly(secret_key=SECRET_KEY, endpoint=endpoint)
-        with pytest.raises(TypeError, match="endpoint must be"):
+        with pytest.raises(TypeError, match="upstream must"):
             FingerlyProxy(
                 proxy_key=PROXY_KEY, upstream=endpoint, client_ip=lambda _: ""
             )
@@ -273,11 +292,17 @@ class TestEndpointsRefusedAtConstruction:
 
 class TestScreeningRedaction:
     def test_repr_does_not_print_the_key_it_will_present(self) -> None:
-        proxy = FingerlyProxy(secret_key=SECRET_KEY, client_ip=lambda _: "203.0.113.7")
-        screening = proxy.screen(ProxyRequest("POST", "/x", Headers([])))
-        assert screening.api_key == SECRET_KEY
-        assert SECRET_KEY not in repr(screening)
-        assert SECRET_KEY not in str(screening)
+        proxy = FingerlyProxy(proxy_key=PROXY_KEY, client_ip=lambda _: "203.0.113.7")
+        screening = proxy.screen(
+            ProxyRequest(
+                "POST",
+                "/x",
+                Headers([("origin", "https://shop.test"), ("x-api-key", PUBLIC_KEY)]),
+            )
+        )
+        assert screening.api_key == PUBLIC_KEY
+        assert PUBLIC_KEY not in repr(screening)
+        assert PUBLIC_KEY not in str(screening)
 
 
 class TestOneTlsContext:

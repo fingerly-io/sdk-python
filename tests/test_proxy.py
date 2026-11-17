@@ -27,6 +27,7 @@ PROXY_KEY = "fly_px_development_test"
 PUBLIC_KEY = "fly_pk_development_test"
 PATH = "/k7x2qm4a"
 INGEST = "https://api.fingerly.io/api/v1/ingest"
+BROWSER = {"x-api-key": PUBLIC_KEY, "origin": "https://shop.test"}
 
 
 def proxy(recorder: Recorder, **options: Any) -> FingerlyProxy:
@@ -154,10 +155,6 @@ class TestConstruction:
         with pytest.raises(TypeError):
             FingerlyProxy(client_ip=lambda request: "")
         with pytest.raises(TypeError):
-            FingerlyProxy(
-                client_ip=lambda request: "", proxy_key=PROXY_KEY, secret_key="x"
-            )
-        with pytest.raises(TypeError):
             FingerlyProxy(client_ip=None, proxy_key=PROXY_KEY)  # type: ignore[arg-type]
 
     def test_rejects_a_key_of_the_wrong_kind(self) -> None:
@@ -176,7 +173,7 @@ class TestConstruction:
         for adapter, call in both(
             proxy(recorder := Recorder(json_response({})), path=" /k7x2qm4a// ")
         ):
-            status, _, _ = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            status, _, _ = call(adapter, headers=BROWSER)
             assert status == 200
         assert recorder.calls == 2
 
@@ -191,17 +188,19 @@ class TestConstruction:
 
 class TestForwarding:
     @pytest.mark.parametrize(
-        "payload", [b'{"signals":{}}', b'{"token":"deferred","signals":{}}']
+        "payload",
+        [
+            b'{"v":3,"signals":{"latency":142.50,"sci":1e-05}}',
+            b'{"v":3,"sdk":{"platform":"web","version":"0.3.0"},"signals":{}}',
+        ],
     )
-    def test_forwards_both_calls_to_the_one_ingest_url(self, payload: bytes) -> None:
-        # The identification and the deferred report share one path, and the
-        # API tells them apart by the body, so the proxy never looks inside.
+    def test_forwards_raw_v3_payload_verbatim_to_the_one_ingest_url(
+        self, payload: bytes
+    ) -> None:
         for adapter, call in both(
             proxy(recorder := Recorder(json_response({"ok": 1})))
         ):
-            status, _, body = call(
-                adapter, headers={"x-api-key": PUBLIC_KEY}, body=payload
-            )
+            status, _, body = call(adapter, headers=BROWSER, body=payload)
             assert status == 200
             assert body == b'{"ok": 1}'
         assert [str(request.url) for request in recorder.requests] == [INGEST] * 2
@@ -210,7 +209,7 @@ class TestForwarding:
     def test_forwards_to_the_configured_versions_ingest_url(self) -> None:
         recorder = Recorder(json_response({}))
         for adapter, call in both(proxy(recorder, api_version="v2")):
-            status, _, _ = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            status, _, _ = call(adapter, headers=BROWSER)
             assert status == 200
         assert [str(request.url) for request in recorder.requests] == [
             "https://api.fingerly.io/api/v2/ingest"
@@ -220,9 +219,7 @@ class TestForwarding:
         recorder = Recorder(json_response({}))
         for adapter, call in both(proxy(recorder, path=None)):
             for path in [PATH, "/anything/at/all", ""]:
-                status, _, _ = call(
-                    adapter, path=path, headers={"x-api-key": PUBLIC_KEY}
-                )
+                status, _, _ = call(adapter, path=path, headers=BROWSER)
                 assert status == 200
         assert [str(request.url) for request in recorder.requests] == [INGEST] * 6
 
@@ -246,7 +243,7 @@ class TestForwarding:
             assert upstream.headers["x-fingerly-origin"] == "https://shop.test"
             assert upstream.headers["x-fingerly-user-agent"] == "Firefox"
             assert upstream.headers["idempotency-key"] == "idem-1"
-            assert upstream.headers["x-fingerly-proxy-version"] == "python/0.2.0"
+            assert upstream.headers["x-fingerly-proxy-version"] == "python/0.3.0"
             assert "cookie" not in upstream.headers
             assert "authorization" not in upstream.headers
 
@@ -271,7 +268,7 @@ class TestForwarding:
             },
         )
         for adapter, call in both(proxy(Recorder(upstream))):
-            _, headers, body = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            _, headers, body = call(adapter, headers=BROWSER)
             assert body == plain
             assert headers == {
                 "content-type": "application/json",
@@ -296,13 +293,13 @@ class TestForwarding:
             mounted.asgi,
             path=path,
             root_path=PATH,
-            headers={"x-api-key": PUBLIC_KEY},
+            headers=BROWSER,
         )
         wsgi_status, _, _ = call_wsgi(
             mounted.wsgi,
             path="",
             script_name=PATH,
-            headers={"x-api-key": PUBLIC_KEY},
+            headers=BROWSER,
         )
         assert (asgi_status, wsgi_status) == (200, 200)
         assert recorder.calls == 2
@@ -317,13 +314,13 @@ class TestForwarding:
             mounted.asgi,
             path="/shop" + PATH,
             root_path="/shop",
-            headers={"x-api-key": PUBLIC_KEY},
+            headers=BROWSER,
         )
         wsgi_status, _, _ = call_wsgi(
             mounted.wsgi,
             path=PATH,
             script_name="/shop",
-            headers={"x-api-key": PUBLIC_KEY},
+            headers=BROWSER,
         )
         assert (asgi_status, wsgi_status) == (200, 200)
         assert recorder.calls == 2
@@ -336,13 +333,13 @@ class TestForwarding:
             mounted.asgi,
             path="/shop" + PATH,
             root_path="/shop" + PATH,
-            headers={"x-api-key": PUBLIC_KEY},
+            headers=BROWSER,
         )
         wsgi_status, _, _ = call_wsgi(
             mounted.wsgi,
             path="",
             script_name="/shop" + PATH,
-            headers={"x-api-key": PUBLIC_KEY},
+            headers=BROWSER,
         )
         assert (asgi_status, wsgi_status) == (200, 200)
         assert recorder.calls == 2
@@ -368,6 +365,7 @@ class TestForwarding:
             "PATH_INFO": PATH,
             "CONTENT_LENGTH": str(len(payload)),
             "HTTP_X_API_KEY": PUBLIC_KEY,
+            "HTTP_ORIGIN": "https://shop.test",
             "wsgi.input": Socket(payload),
         }
         statuses: list[str] = []
@@ -380,7 +378,7 @@ class TestForwarding:
         payload = b'{"signals":"' + b"x" * 300 + b'"}'
         call_asgi(
             proxy(recorder).asgi,
-            headers={"x-api-key": PUBLIC_KEY},
+            headers=BROWSER,
             body=payload,
             chunks=4,
         )
@@ -401,6 +399,8 @@ class TestRefusals:
         "path",
         [
             "/k7x2qm4a/admin",
+            "/k7x2qm4a/supplement",
+            "/k7x2qm4a/events/req_1/supplement",
             "/k7x2qm4a/api/v1/identify",
             "/k7x2qm4ax",
             "/other",
@@ -410,8 +410,9 @@ class TestRefusals:
     )
     def test_refuses_every_path_but_the_configured_one(self, path: str) -> None:
         for adapter, call in both(proxy(recorder := Recorder(json_response({})))):
-            status, _, _ = call(adapter, path=path, headers={"x-api-key": PUBLIC_KEY})
+            status, headers, _ = call(adapter, path=path, headers=BROWSER)
             assert status == 404
+            assert headers["cache-control"] == "no-store"
         assert recorder.calls == 0
 
     @pytest.mark.parametrize(
@@ -446,11 +447,9 @@ class TestRefusals:
     def test_accepts_the_exact_path_with_a_query(self) -> None:
         recorder = Recorder(json_response({}))
         app = proxy(recorder)
-        call_asgi(app.asgi, raw_path=PATH, headers={"x-api-key": PUBLIC_KEY})
+        call_asgi(app.asgi, raw_path=PATH, headers=BROWSER)
         for raw in [PATH + "?v=1", "https://shop.test" + PATH + "?v=1"]:
-            status, _, _ = call_wsgi(
-                app.wsgi, raw_uri=raw, headers={"x-api-key": PUBLIC_KEY}
-            )
+            status, _, _ = call_wsgi(app.wsgi, raw_uri=raw, headers=BROWSER)
             assert status == 200
         assert recorder.calls == 3
 
@@ -516,9 +515,7 @@ class TestRefusals:
         for adapter, call in both(
             proxy(recorder := Recorder(json_response({})), max_body_bytes=4)
         ):
-            status, _, _ = call(
-                adapter, headers={"x-api-key": PUBLIC_KEY}, body=b"far too long"
-            )
+            status, _, _ = call(adapter, headers=BROWSER, body=b"far too long")
             assert status == 413
         assert recorder.calls == 0
 
@@ -527,7 +524,7 @@ class TestRefusals:
         recorder = Recorder(json_response({}))
         status, _, _ = call_asgi(
             proxy(recorder, max_body_bytes=4).asgi,
-            headers={"x-api-key": PUBLIC_KEY},
+            headers=BROWSER,
             body=b"far too long",
             chunks=4,
         )
@@ -563,7 +560,11 @@ class TestClientIp:
         ):
             call(
                 adapter,
-                headers={"x-api-key": PUBLIC_KEY, "CF-Connecting-IP": "203.0.113.7"},
+                headers={
+                    "x-api-key": PUBLIC_KEY,
+                    "origin": "https://shop.test",
+                    "CF-Connecting-IP": "203.0.113.7",
+                },
             )
 
         assert len(seen) == 2
@@ -601,7 +602,7 @@ class TestClientIp:
         recorder = Recorder(json_response({}))
         injected = proxy(recorder, client_ip=lambda request: address)
         for adapter, call in both(injected):
-            status, headers, body = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            status, headers, body = call(adapter, headers=BROWSER)
             assert status == 500
             assert body == b"The client IP callback returned no valid address"
             assert headers["content-type"] == "text/plain; charset=utf-8"
@@ -619,7 +620,7 @@ class TestClientIp:
         )
         for adapter, call in both(strict):
             for _ in range(3):
-                status, _, _ = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+                status, _, _ = call(adapter, headers=BROWSER)
                 assert status == 500
         assert recorder.calls == 0
         assert len(caplog.records) == 1
@@ -629,7 +630,7 @@ class TestClientIp:
     def test_forwards_a_valid_address(self, address: str) -> None:
         recorder = Recorder(json_response({}))
         for adapter, call in both(proxy(recorder, client_ip=lambda request: address)):
-            status, _, _ = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            status, _, _ = call(adapter, headers=BROWSER)
             assert status == 200
         assert [r.headers["x-fingerly-client-ip"] for r in recorder.requests] == [
             address
@@ -640,22 +641,61 @@ class TestClientIp:
         recorder = Recorder(json_response({}))
         status, _, _ = call_wsgi(
             proxy(recorder, client_ip=lambda request: "").wsgi,
-            headers={"x-api-key": PUBLIC_KEY},
+            headers=BROWSER,
         )
         assert status == 500
         assert recorder.calls == 0
 
 
-class TestDeprecatedSecretKey:
-    def test_forwards_the_secret_key_without_a_public_key(self) -> None:
+class TestNoSecretKeyUpstream:
+    """The proxy holds only a proxy key and never relays a secret key."""
+
+    def test_has_no_secret_key_parameter(self) -> None:
+        with pytest.raises(TypeError):
+            FingerlyProxy(  # type: ignore[call-arg]
+                client_ip=lambda request: "203.0.113.10",
+                secret_key="fly_sk_development_test",
+            )
+        with pytest.raises(TypeError):
+            FingerlyProxy(  # type: ignore[call-arg]
+                client_ip=lambda request: "203.0.113.10",
+                proxy_key=PROXY_KEY,
+                secret_key="fly_sk_development_test",
+            )
+
+    def test_requires_a_well_formed_proxy_key(self) -> None:
+        for key in [None, "", "fly_px_", "fly_px_moon_test", "fly_px_development_a b"]:
+            with pytest.raises(TypeError):
+                FingerlyProxy(client_ip=lambda request: "203.0.113.10", proxy_key=key)
+
+    def test_refuses_a_browser_presenting_a_secret_key(self) -> None:
         recorder = Recorder(json_response({}))
-        legacy = proxy(recorder, proxy_key=None, secret_key="fly_sk_development_test")
-        for adapter, call in both(legacy):
-            status, _, _ = call(adapter, headers={})
+        for adapter, call in both(proxy(recorder)):
+            for presented in [
+                "fly_sk_development_test",
+                "fly_pk_production_test",
+                "fly_px_development_test",
+                "",
+            ]:
+                headers = {"origin": "https://shop.test"}
+                if presented:
+                    headers["x-api-key"] = presented
+                status, response_headers, _ = call(adapter, headers=headers)
+                assert status == 401
+                assert response_headers["content-type"].startswith("text/plain")
+                assert response_headers["cache-control"] == "no-store"
+        assert recorder.calls == 0
+
+    def test_forwards_only_the_public_key_and_the_proxy_key(self) -> None:
+        recorder = Recorder(json_response({}))
+        for adapter, call in both(proxy(recorder)):
+            status, _, _ = call(adapter, headers=BROWSER)
             assert status == 200
+        assert len(recorder.requests) == 2
         for upstream in recorder.requests:
-            assert upstream.headers["x-api-key"] == "fly_sk_development_test"
-            assert "x-fingerly-proxy-key" not in upstream.headers
+            assert upstream.headers["x-api-key"] == PUBLIC_KEY
+            assert upstream.headers["x-fingerly-proxy-key"] == PROXY_KEY
+            assert not any("fly_sk_" in value for value in upstream.headers.values())
 
 
 class TestLifecycle:
@@ -703,7 +743,7 @@ class TestNoSharedState:
         recorder = Recorder(upstream)
         for adapter, call in both(proxy(recorder)):
             for _ in range(3):
-                call(adapter, headers={"x-api-key": PUBLIC_KEY})
+                call(adapter, headers=BROWSER)
         assert recorder.calls == 6
         assert all("cookie" not in request.headers for request in recorder.requests)
 
@@ -756,7 +796,7 @@ class TestUpstreamFailures:
 
         caplog.set_level("WARNING", logger="fingerly.proxy")
         for adapter, call in both(proxy(Recorder.of(raising))):
-            got, headers, payload = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            got, headers, payload = call(adapter, headers=BROWSER)
             assert (got, payload) == (status, body)
             assert headers["cache-control"] == "no-store"
             assert headers["content-type"] == "text/plain; charset=utf-8"
@@ -778,7 +818,7 @@ class TestUpstreamFailures:
         )
         caplog.set_level("WARNING", logger="fingerly.proxy")
         for adapter, call in both(proxy(recorder)):
-            status, _, payload = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            status, _, payload = call(adapter, headers=BROWSER)
             assert (status, payload) == (502, b"Bad gateway")
         assert all("over 4 MiB" in r.getMessage() for r in caplog.records)
 
@@ -788,7 +828,7 @@ class TestUpstreamFailures:
             return httpx.Response(200, stream=Chunks([b'{"request_id":'], failure))
 
         for adapter, call in both(proxy(Recorder.of(truncated))):
-            status, _, payload = call(adapter, headers={"x-api-key": PUBLIC_KEY})
+            status, _, payload = call(adapter, headers=BROWSER)
             assert (status, payload) == (502, b"Bad gateway")
 
 
@@ -831,7 +871,10 @@ class TestDisconnect:
                 "method": "POST",
                 "path": PATH,
                 "root_path": "",
-                "headers": [(b"x-api-key", PUBLIC_KEY.encode())],
+                "headers": [
+                    (b"x-api-key", PUBLIC_KEY.encode()),
+                    (b"origin", b"https://shop.test"),
+                ],
             }
             await asyncio.wait_for(app(scope, receive, send), 5)
             # Nothing left running once the visitor is gone.
@@ -857,7 +900,12 @@ class TestVisitorHeaders:
         )
         environ_ua = "Mozilla \xe9"  # PEP 3333: Latin-1 decoded, as here
         status, _, _ = call_wsgi(
-            app.wsgi, headers={"x-api-key": PUBLIC_KEY, "user-agent": environ_ua}
+            app.wsgi,
+            headers={
+                "x-api-key": PUBLIC_KEY,
+                "origin": "https://shop.test",
+                "user-agent": environ_ua,
+            },
         )
         assert status == 200
         assert recorder.calls == 2
@@ -866,3 +914,167 @@ class TestVisitorHeaders:
         assert sent[0][b"x-fingerly-user-agent"] == "Mozilla é".encode()
         assert sent[0][b"x-fingerly-origin"] == "ü".encode()
         assert sent[1][b"x-fingerly-user-agent"] == b"Mozilla \xe9"
+
+
+class TestV3RelayConformance:
+    def test_rejects_originless_browser_requests_and_invalid_sdk_platforms(
+        self,
+    ) -> None:
+        import json
+
+        recorder = Recorder(json_response({"request_id": "one"}))
+        app = proxy(recorder)
+        for adapter, call in both(app):
+            status, headers, body = call(
+                adapter,
+                headers={
+                    "x-api-key": PUBLIC_KEY,
+                    "host": "shop.test",
+                    "referer": "https://shop.test/checkout",
+                },
+            )
+            assert status == 400
+            assert headers["cache-control"] == "no-store"
+            assert json.loads(body)["error"]["code"] == "missing_origin"
+
+            for invalid in [
+                "",
+                "web",
+                "iOS",
+                "ANDROID",
+                " ios",
+                "ios ",
+                "ios\n",
+                "ios, android",
+                "unknown",
+            ]:
+                status, headers, body = call(
+                    adapter,
+                    headers={
+                        "x-api-key": PUBLIC_KEY,
+                        "x-fingerly-sdk-platform": invalid,
+                        "x-fingerly-origin": "https://forged.test",
+                        "x-fingerly-proxy-key": "fly_px_development_forged",
+                        "x-fingerly-client-ip": "1.2.3.4",
+                    },
+                )
+                assert status == 400, invalid
+                assert headers["cache-control"] == "no-store"
+                assert json.loads(body)["error"]["code"] == "missing_origin"
+        assert recorder.calls == 0
+
+    def test_sanitizes_and_restores_valid_native_platforms_without_origin(
+        self,
+    ) -> None:
+        valid_platforms = [
+            "ios",
+            "android",
+            "react-native",
+            "react-native-ios",
+            "react-native-android",
+            "flutter",
+            "flutter-ios",
+            "flutter-android",
+            "lynx-ios",
+            "lynx-android",
+            "capacitor",
+            "kotlin-multiplatform",
+        ]
+        raw_payload = b'{"v":3,"signals":{"latency":142.50,"sci":1e-05}}'
+        recorder = Recorder(
+            httpx.Response(
+                409,
+                content=b'{"error":{"code":"request_in_progress","status":409}}',
+                headers={
+                    "content-type": "application/json",
+                    "retry-after": "1",
+                    "x-request-id": "req-409",
+                },
+            )
+        )
+        app = proxy(recorder)
+        for platform in valid_platforms:
+            for adapter, call in both(app):
+                status, headers, _ = call(
+                    adapter,
+                    headers={
+                        "x-api-key": PUBLIC_KEY,
+                        "X-Fingerly-SDK-Platform": platform,
+                        "idempotency-key": "idem-py-native-0001",
+                        "x-fingerly-origin": "https://forged.test",
+                        "x-fingerly-proxy-key": "fly_px_development_forged",
+                        "x-fingerly-client-ip": "1.2.3.4",
+                        "x-fingerly-edge-tls-version": "TLSv1.3",
+                        "cookie": "sid=secret",
+                        "authorization": "Bearer secret",
+                    },
+                    body=raw_payload,
+                )
+                assert status == 409
+                assert headers["retry-after"] == "1"
+                assert headers["cache-control"] == "no-store"
+                sent = recorder.requests[-1]
+                assert sent.content == raw_payload
+                assert sent.headers["x-fingerly-sdk-platform"] == platform
+                assert "x-fingerly-origin" not in sent.headers
+                assert sent.headers["x-fingerly-proxy-key"] == PROXY_KEY
+                assert sent.headers["x-fingerly-client-ip"] == "203.0.113.10"
+                assert "x-fingerly-edge-tls-version" not in sent.headers
+                assert sent.headers["idempotency-key"] == "idem-py-native-0001"
+                assert "cookie" not in sent.headers
+                assert "authorization" not in sent.headers
+
+    def test_forwards_client_metadata_and_honours_cors_allowlist(self) -> None:
+        raw_payload = b'{"v":3,"signals":{"latency":142.50}}'
+        recorder = Recorder(
+            httpx.Response(
+                200,
+                content=b'{"request_id":"ok"}',
+                headers={"content-type": "application/json", "retry-after": "2"},
+            )
+        )
+        app = proxy(recorder, allowed_origins=["https://app.shop.test"])
+        for adapter, call in both(app):
+            pre_status, pre_headers, pre_body = call(
+                adapter,
+                method="OPTIONS",
+                headers={"origin": "https://app.shop.test"},
+                body=b"",
+            )
+            assert pre_status == 204
+            assert pre_body == b""
+            assert pre_headers["access-control-allow-origin"] == "https://app.shop.test"
+            assert (
+                "x-fingerly-sdk-platform" in pre_headers["access-control-allow-headers"]
+            )
+            assert "retry-after" in pre_headers["access-control-expose-headers"]
+
+            status, headers, _ = call(
+                adapter,
+                headers={
+                    "x-api-key": PUBLIC_KEY,
+                    "origin": "https://app.shop.test",
+                    "idempotency-key": "idem-py-web-00001",
+                    "sec-fetch-site": "same-site",
+                    "sec-fetch-mode": "cors",
+                    "sec-fetch-dest": "empty",
+                    "sec-ch-ua": '"Chromium";v="130"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"macOS"',
+                    "x-fingerly-sdk-platform": "web",
+                },
+                body=raw_payload,
+            )
+            assert status == 200
+            assert headers["access-control-allow-origin"] == "https://app.shop.test"
+            assert "retry-after" in headers["access-control-expose-headers"]
+            sent = recorder.requests[-1]
+            assert sent.content == raw_payload
+            assert sent.headers["x-fingerly-origin"] == "https://app.shop.test"
+            assert "x-fingerly-sdk-platform" not in sent.headers
+            assert sent.headers["sec-fetch-site"] == "same-site"
+            assert sent.headers["sec-fetch-mode"] == "cors"
+            assert sent.headers["sec-fetch-dest"] == "empty"
+            assert sent.headers["sec-ch-ua"] == '"Chromium";v="130"'
+            assert sent.headers["sec-ch-ua-mobile"] == "?0"
+            assert sent.headers["sec-ch-ua-platform"] == '"macOS"'
