@@ -108,7 +108,7 @@ class TestStarlette:
         assert str(forwarded.url) == INGEST
         assert forwarded.headers["x-fingerly-client-ip"] == "203.0.113.5"
         assert forwarded.headers["x-fingerly-proxy-key"] == PROXY_KEY
-        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.3.0"
+        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.4.0"
         assert "cookie" not in forwarded.headers
 
         (missing_origin,) = self.post(
@@ -224,7 +224,7 @@ class TestFlask:
         forwarded = upstream.requests[0]
         assert forwarded.content == raw_v3
         assert forwarded.headers["x-fingerly-client-ip"] == "203.0.113.5"
-        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.3.0"
+        assert forwarded.headers["x-fingerly-proxy-version"] == "python/0.4.0"
         assert "cookie" not in forwarded.headers
         native_forwarded = upstream.requests[1]
         assert native_forwarded.content == raw_v3

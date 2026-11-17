@@ -11,8 +11,9 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
+from ._enums import Signal, VerifyReason
 from ._errors import FingerlyError
 
 _INSTANT = re.compile(
@@ -21,81 +22,9 @@ _INSTANT = re.compile(
     r"(?:[Zz]|(?P<sign>[+-])(?P<hours>\d{2}):?(?P<minutes>\d{2}))\Z"
 )
 
-#: Canonical v3 risk signal and signal-group names reported in event triggers
-#: and archived risk assessments.
-SIGNAL_NAMES: tuple[str, ...] = (
-    "tor",
-    "datacenter_proxy",
-    "proxy",
-    "datacenter_ip",
-    "residential_proxy",
-    "residential_proxy_low_confidence",
-    "residential_proxy_medium_confidence",
-    "residential_proxy_high_confidence",
-    "vpn",
-    "vpn_public",
-    "vpn_timezone",
-    "vpn_relay",
-    "vpn_mobile",
-    "vpn_os_mismatch",
-    "vpn_low_confidence",
-    "vpn_medium_confidence",
-    "vpn_high_confidence",
-    "ip_blocklist",
-    "ip_blocklist_email_spam",
-    "ip_blocklist_attack_source",
-    "ip_reputation",
-    "ip_abuser",
-    "network_anomaly",
-    "bogon_ip",
-    "anycast_ip",
-    "location_spoofing",
-    "geo_mismatch",
-    "ios_simulator",
-    "simulator",
-    "android_emulator",
-    "emulator",
-    "virtual_machine",
-    "jailbroken_device",
-    "jailbreak",
-    "rooted_device",
-    "root_apps",
-    "play_device_integrity_failed",
-    "cloned_app",
-    "app_cloner",
-    "play_app_unrecognized",
-    "device_farm",
-    "app_attest_key_churn",
-    "mitm_attack",
-    "frida_detected",
-    "frida",
-    "browser_tampering",
-    "tampering",
-    "antidetect_browser",
-    "fingerprint_suppressed",
-    "developer_tools",
-    "remote_control",
-    "bot",
-    "automation",
-    "bad_bot",
-    "fetch_metadata_missing",
-    "web_ticket_missing",
-    "web_ticket_invalid",
-    "high_activity",
-    "incognito_mode",
-    "incognito",
-    "privacy_settings",
-    "embedded_web_view",
-    "active_call",
-    "attestation_missing",
-    "attestation_failed",
-    "attestation_downgrade",
-    "device_inconsistent",
-    "report_incomplete",
-    "probe_errors",
-    "custom_root_ca",
-    "secondary_user_profile",
-)
+#: Every :class:`Signal` value, in declaration order. Kept for callers that
+#: want plain strings; prefer the :class:`Signal` members.
+SIGNAL_NAMES: tuple[str, ...] = tuple(signal.value for signal in Signal)
 
 
 @dataclass(frozen=True)
@@ -104,9 +33,10 @@ class EventTrigger:
 
     Attributes:
         signal: The signal group, such as ``vpn``, ``bot`` or
-            ``attestation_failed``.
+            ``attestation_failed``; compare with :class:`Signal` members.
         weight: The group's combined weight in this score.
-        confidence: ``low``, ``medium`` or ``high``.
+        confidence: ``low``, ``medium`` or ``high``, a :class:`Confidence`
+            value.
     """
 
     signal: str
@@ -119,12 +49,14 @@ class Attestation:
     """Platform-neutral hardware attestation verdict from an archived document.
 
     Attributes:
-        state: ``attested``, ``not_attested`` or ``failed``.
+        state: ``attested``, ``not_attested`` or ``failed``, an
+            :class:`AttestationState` value.
         status: ``verified``, ``indeterminate``, ``invalid``, ``absent`` or
-            ``unconfigured``.
+            ``unconfigured``, an :class:`AttestationStatus` value.
         attest_skipped: Native only: the app's own reason for sending no
-            attestation, such as ``not_offered``, ``unsupported`` or
-            ``timeout``. Diagnostic only; it never lowers the score.
+            attestation, an :class:`AttestSkippedReason` value such as
+            ``not_offered``, ``unsupported`` or ``timeout``. Diagnostic only;
+            it never lowers the score.
         downgrade: Native only: an unproven or rejected report named an
             install an attested device owns, so it was answered
             unidentifiable.
@@ -186,6 +118,11 @@ class Event:
     allow-listed view of the archived request (schema, request id, time, SDK,
     network, IP classification and city-level location, risk, attestation and
     velocity), with no raw signals, user agent or address.
+
+    Closed string sets stay typed ``str`` and hold the value as sent, so a
+    value a newer server adds still parses. Compare them with the enum
+    members: ``state`` with :class:`EventState`, ``environment`` with
+    :class:`Environment`, ``suspect_level`` with :class:`SuspectLevel`.
 
     Attributes:
         project_id: The Fingerly project the event belongs to, as a UUID
@@ -319,18 +256,6 @@ class ConsumeResult:
     first: bool
 
 
-#: Why :meth:`Events.verify` refused an event, or ``""`` when it passed.
-VerifyReason = Literal[
-    "",
-    "not_found",
-    "too_old",
-    "tag_mismatch",
-    "unidentifiable",
-    "unscored",
-    "already_consumed",
-]
-
-
 @dataclass(frozen=True)
 class VerifyResult:
     """The outcome of :meth:`Events.verify`.
@@ -338,9 +263,10 @@ class VerifyResult:
     Attributes:
         ok: True when every check passed, and the event was consumed unless
             ``consume=False``.
-        reason: ``""`` when ``ok``; otherwise the first check that failed:
-            ``not_found``, ``too_old``, ``tag_mismatch``, ``unidentifiable``,
-            ``unscored`` or ``already_consumed``.
+        reason: A :class:`VerifyReason` member: ``VerifyReason.OK`` (``""``)
+            when ``ok``; otherwise the first check that failed: ``not_found``,
+            ``too_old``, ``tag_mismatch``, ``unidentifiable``, ``unscored`` or
+            ``already_consumed``. It compares equal to those strings.
         event: The event read, or None only for ``not_found``. When its
             ``occurred_at`` was missing or unreadable (reason ``too_old``),
             ``event.occurred_at`` is the earliest UTC ``datetime`` and
@@ -406,14 +332,14 @@ def failed_check(
     level and triggers are never looked at.
     """
     if occurred is None or (now - occurred).total_seconds() > max_age_seconds:
-        return "too_old"
+        return VerifyReason.TOO_OLD
     if tag is not None and (event.tag or "") != tag:
-        return "tag_mismatch"
+        return VerifyReason.TAG_MISMATCH
     if not event.visitor_id:
-        return "unidentifiable"
+        return VerifyReason.UNIDENTIFIABLE
     if event.suspect_score is None:
-        return "unscored"
-    return ""
+        return VerifyReason.UNSCORED
+    return VerifyReason.OK
 
 
 def parse_device_check_bits(payload: Mapping[str, Any]) -> DeviceCheckBits:
