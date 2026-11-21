@@ -33,6 +33,7 @@ import httpx
 
 from ._client import AsyncFingerly, Fingerly
 from ._errors import FingerlyAPIError, FingerlyConnectionError, FingerlyTimeoutError
+from ._http import REQUEST_PROGRESS, RequestProgress
 from ._models import AGENT_UNKNOWN, AgentAnswer, AgentSighting, AgentSightingsResult
 from ._proxy import ProxyRequest, _is_ip_literal
 
@@ -63,6 +64,12 @@ MAX_COUNT = 1_000_000
 AUTH_PAUSE = 60.0
 #: Reporting pauses this long after a ``429`` that did not say for how long.
 RATE_LIMIT_PAUSE = 60.0
+#: The shortest pause after a ``429``, whatever its ``Retry-After`` says.
+MIN_RATE_LIMIT_PAUSE = 1.0
+#: The longest an answer is remembered, in seconds, whatever its ``ttl``.
+MAX_TTL = 86400.0
+#: The longest :meth:`AgentSightings.flush` waits for a report in flight.
+FLUSH_WAIT = FLUSH_DEADLINE + 1.0
 #: The first and the longest pause after a ``503`` or an unreachable API.
 BACKOFF_START = 1.0
 BACKOFF_MAX = 60.0
@@ -200,6 +207,18 @@ def _cache_size(value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise TypeError("cache_size must be a positive integer")
     return min(value, MAX_CACHE_SIZE)
+
+
+async def _acquire_within(lock: asyncio.Lock, timeout: float) -> bool:
+    """Takes ``lock`` within ``timeout`` seconds, or gives up without it."""
+    attempt = asyncio.ensure_future(lock.acquire())
+    try:
+        await asyncio.wait({attempt}, timeout=timeout)
+    finally:
+        if not attempt.done():
+            attempt.cancel()
+    # A cancelled attempt never holds the lock.
+    return attempt.done() and not attempt.cancelled()
 
 
 _instances: weakref.WeakSet[_BaseSightings] = weakref.WeakSet()
@@ -392,9 +411,9 @@ class _BaseSightings:
 
     @staticmethod
     def _signature_header(request: ProxyRequest, name: str) -> Optional[str]:
-        """A Web Bot Auth header, or None when absent or over the limit."""
+        """A Web Bot Auth header, or None when absent, blank or over the limit."""
         value = request.headers.get(name)
-        if not value:
+        if not value or not value.strip(" \t"):
             return None
         text = _wire_text(value)
         return text if _utf8_len(text) <= MAX_HEADER_BYTES else None
@@ -496,8 +515,11 @@ class _BaseSightings:
         batch: Sequence[_Pending],
         result: Optional[AgentSightingsResult],
         error: Optional[BaseException],
+        written: bool = False,
     ) -> bool:
         """Applies the answer, or the failure rules, to a batch in flight.
+
+        ``written`` says the request was written in full before ``error``.
 
         Returns:
             True when the batch was answered, so another may follow.
@@ -521,10 +543,10 @@ class _BaseSightings:
                     self._rules_version = result.rules_version
                 for entry, answer in zip(batch, result.items):
                     if answer.ttl > 0:
-                        self._store(entry.key, answer, now + answer.ttl)
+                        self._store(entry.key, answer, now + min(answer.ttl, MAX_TTL))
             return True
 
-        outcome = self._classify(error)
+        outcome = self._classify(error, written)
         with self._lock:
             self._in_flight = 0
             if outcome.keep:
@@ -539,7 +561,7 @@ class _BaseSightings:
             self._log(*outcome.log)
         return False
 
-    def _classify(self, error: Optional[BaseException]) -> _Outcome:
+    def _classify(self, error: Optional[BaseException], written: bool) -> _Outcome:
         """The section 6 failure table of the agent sightings contract."""
         if isinstance(error, FingerlyAPIError):
             status = error.status
@@ -587,6 +609,19 @@ class _BaseSightings:
                 ),
             )
         if isinstance(error, FingerlyConnectionError):
+            if written:
+                # Closed, reset or cut short once the report was written: the
+                # server may have counted it, as after a timeout. A transport
+                # that cannot tell leaves ``written`` unset, and the batch is
+                # kept.
+                return _Outcome(
+                    keep=False,
+                    log=(
+                        "closed",
+                        "Agent sightings lost the connection after the report "
+                        "was sent; the batch was dropped",
+                    ),
+                )
             return _Outcome(keep=True, backoff=True)
         return _Outcome(
             keep=False,
@@ -595,7 +630,7 @@ class _BaseSightings:
 
     def _rate_limit_pause(self, error: FingerlyAPIError) -> float:
         if error.retry_after is not None:
-            return max(0.0, error.retry_after)
+            return max(MIN_RATE_LIMIT_PAUSE, error.retry_after)
         if error.rate_limit_scope == "daily":
             now = self._utc_now()
             midnight = datetime(
@@ -732,16 +767,20 @@ class AgentSightings(_BaseSightings):
     def flush(self) -> None:
         """Sends every pending report now, one batch at a time.
 
-        Waits for a report already in flight first. Stops early while
-        reporting is paused or when a batch fails, and never raises. Call it
-        before a serverless invocation ends.
+        Waits up to 6 seconds for a report already in flight first. Stops
+        early while reporting is paused or when a batch fails, and never
+        raises. Call it before a serverless invocation ends.
         """
         try:
             while True:
-                with self._send_lock:
+                if not self._send_lock.acquire(timeout=FLUSH_WAIT):
+                    return
+                try:
                     batch = self._take(self._clock(), force=True)
                     if batch is None or not self._send(batch):
                         return
+                finally:
+                    self._send_lock.release()
         except Exception:
             self._log("flush", "Agent sightings could not flush")
 
@@ -801,12 +840,16 @@ class AgentSightings(_BaseSightings):
 
     def _send(self, batch: list[_Pending]) -> bool:
         """Sends one batch and settles it. Holds the send lock."""
+        progress = RequestProgress()
+        token = REQUEST_PROGRESS.set(progress)
         try:
             result = self._client.agents.sightings(
                 self._items_of(batch), timeout=FLUSH_DEADLINE
             )
         except Exception as error:
-            return self._settle(batch, None, error)
+            return self._settle(batch, None, error, progress.written)
+        finally:
+            REQUEST_PROGRESS.reset(token)
         return self._settle(batch, result, None)
 
 
@@ -867,14 +910,22 @@ class AsyncAgentSightings(_BaseSightings):
         return SightingsASGI(app, self)
 
     async def flush(self) -> None:
-        """Sends every pending report now. See :meth:`AgentSightings.flush`."""
+        """Sends every pending report now. See :meth:`AgentSightings.flush`.
+
+        Cancelling the task that awaits it cancels it, as with any coroutine;
+        nothing else is raised.
+        """
         try:
             lock = self._lock_for_loop()
             while True:
-                async with lock:
+                if not await _acquire_within(lock, FLUSH_WAIT):
+                    return
+                try:
                     batch = self._take(self._clock(), force=True)
                     if batch is None or not await self._send(batch):
                         return
+                finally:
+                    lock.release()
         except Exception:
             self._log("flush", "Agent sightings could not flush")
 
@@ -952,10 +1003,14 @@ class AsyncAgentSightings(_BaseSightings):
                 self._log("flush", "Agent sightings could not flush")
 
     async def _send(self, batch: list[_Pending]) -> bool:
+        progress = RequestProgress()
+        token = REQUEST_PROGRESS.set(progress)
         try:
             result = await self._client.agents.sightings(
                 self._items_of(batch), timeout=FLUSH_DEADLINE
             )
         except Exception as error:
-            return self._settle(batch, None, error)
+            return self._settle(batch, None, error, progress.written)
+        finally:
+            REQUEST_PROGRESS.reset(token)
         return self._settle(batch, result, None)

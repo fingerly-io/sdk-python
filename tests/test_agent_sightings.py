@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
 import threading
 import time
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ import httpx
 import pytest
 from conftest import SECRET_KEY, Recorder, error_response, json_response, run
 
+import fingerly._sightings as sightings_module
 from fingerly import (
     AGENT_UNKNOWN,
     AgentAnswer,
@@ -36,8 +38,10 @@ from fingerly import (
 from fingerly._proxy import Headers
 from fingerly._sightings import (
     BACKOFF_MAX,
+    FLUSH_WAIT,
     MAX_CACHE_SIZE,
     MAX_PENDING,
+    MAX_TTL,
     canonical_ip,
     sighting_key,
 )
@@ -319,6 +323,18 @@ class TestCache:
         assert sightings.lookup(incoming) is AGENT_UNKNOWN
         assert len(sightings._cache) == 0
 
+    def test_a_ttl_is_clamped_to_one_day(self) -> None:
+        clock = Clock()
+        sightings = build(answering(ttl=30 * 86400), clock)
+        incoming = request()
+        seen(sightings, incoming)
+        sightings.flush()
+        assert MAX_TTL == 86400
+        clock.advance(86399.9)
+        assert sightings.lookup(incoming).known
+        clock.advance(0.1)
+        assert sightings.lookup(incoming) is AGENT_UNKNOWN
+
     def test_a_new_rules_version_drops_every_answer(self) -> None:
         version = ["rules-1"]
 
@@ -508,6 +524,24 @@ class TestOversize:
         assert "signature_agent" not in item
         assert item["signature_input"] == 'sig1=("@authority")'
 
+    def test_a_blank_signature_header_is_absent(self) -> None:
+        recorder = answering()
+        sightings = build(recorder)
+        incoming = request(
+            signature="sig1=:AAAA:", signature_input=" \t ", signature_agent="  "
+        )
+        observed = sightings._observe(incoming)
+        assert observed is not None
+        # A blank Signature-Input leaves the request unsigned, and a blank
+        # Signature-Agent hashes as absent.
+        assert observed.key == sighting_key(GPTBOT, "20.171.206.9", "", False)
+        seen(sightings, incoming)
+        sightings.flush()
+        (item,) = sent_items(recorder)
+        assert item["signature"] == "sig1=:AAAA:"
+        assert "signature_input" not in item
+        assert "signature_agent" not in item
+
     def test_an_unresolved_client_ip_is_not_reported(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -629,6 +663,55 @@ class TestFlushTriggers:
         sightings.close()
         assert recorder.calls == 1
 
+    def test_flush_waits_at_most_six_seconds_for_a_flush_in_flight(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert FLUSH_WAIT == 6
+        monkeypatch.setattr(sightings_module, "FLUSH_WAIT", 0.2)
+        recorder = answering()
+        sightings = build(recorder)
+        seen(sightings, request())
+        sightings._send_lock.acquire()  # a flush in flight that never ends
+        try:
+            started = time.monotonic()
+            sightings.flush()  # returns, and does not raise
+            assert 0.2 <= time.monotonic() - started < 1.0
+        finally:
+            sightings._send_lock.release()
+        assert recorder.calls == 0
+        assert sightings.pending == 1
+
+    def test_the_async_flush_waits_at_most_six_seconds_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sightings_module, "FLUSH_WAIT", 0.2)
+        recorder = answering()
+
+        async def scenario() -> float:
+            client = AsyncFingerly(
+                secret_key=SECRET_KEY, transport=recorder.transport()
+            )
+            sightings = AsyncAgentSightings(
+                client,
+                client_ip=lambda incoming: incoming.headers["cf-connecting-ip"],
+                background=False,
+            )
+            sightings.report(request(), "text/html")
+            lock = sightings._lock_for_loop()
+            await lock.acquire()  # a flush in flight that never ends
+            started = time.monotonic()
+            await sightings.flush()  # returns, and does not raise
+            elapsed = time.monotonic() - started
+            lock.release()
+            assert sightings.pending == 1
+            await sightings.flush()  # the lock was not kept by the timed-out wait
+            assert sightings.pending == 0
+            await client.aclose()
+            return elapsed
+
+        assert 0.2 <= run(scenario()) < 1.0
+        assert recorder.calls == 1
+
 
 def failing(*responses: httpx.Response) -> Recorder:
     """Answers with the given responses, then with answers for every item."""
@@ -663,6 +746,56 @@ def raising(*errors: Exception) -> Recorder:
         return fallback(sent)
 
     return Recorder.of(handler)
+
+
+class Hangup:
+    """A local API that reads each report in full, then sends ``reply`` and closes."""
+
+    def __init__(self, reply: bytes) -> None:
+        self.received = 0
+        self._reply = reply
+        self._stopping = False
+        self._server = socket.create_server(("127.0.0.1", 0))
+        self._server.settimeout(0.1)
+        self.url = f"http://127.0.0.1:{self._server.getsockname()[1]}"
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while not self._stopping:
+            try:
+                connection, _ = self._server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            with connection:
+                connection.settimeout(5)
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    data += connection.recv(65536)
+                head, _, body = data.partition(b"\r\n\r\n")
+                length = next(
+                    int(line.split(b":", 1)[1])
+                    for line in head.split(b"\r\n")
+                    if line.lower().startswith(b"content-length:")
+                )
+                while len(body) < length:
+                    body += connection.recv(65536)
+                self.received += 1
+                connection.sendall(self._reply)
+
+    def stop(self) -> None:
+        self._stopping = True
+        self._thread.join(5)
+        self._server.close()
+
+
+#: Response headers, then less of the body than they announce.
+CUT_SHORT = (
+    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+    b'Content-Length: 100\r\n\r\n{"rules_version":'
+)
 
 
 def refusal(status: int, code: str, **headers: str) -> httpx.Response:
@@ -763,6 +896,36 @@ class TestFailures:
         sightings.flush()
         assert recorder.calls == 2
 
+    @pytest.mark.parametrize(
+        ("retry_after", "scope", "pause"),
+        [
+            ("0", None, 1),
+            ("Thu, 01 Jan 2026 00:00:00 GMT", None, 1),  # a date already past
+            ("-5", None, 60),  # unreadable: as if missing
+            ("soon", None, 60),
+            ("soon", "daily", 3600),
+        ],
+        ids=["zero", "past-date", "negative", "unreadable", "unreadable-daily"],
+    )
+    def test_429_pauses_at_least_one_second(
+        self, retry_after: str, scope: Optional[str], pause: int
+    ) -> None:
+        headers = {"retry_after": retry_after}
+        if scope is not None:
+            headers["fingerly_ratelimit_scope"] = scope
+        recorder = failing(refusal(429, "rate_limited", **headers))
+        sightings = self.prime(recorder)
+        sightings._utc_now = lambda: datetime(2026, 11, 21, 23, 0, tzinfo=timezone.utc)
+        sightings.flush()
+        assert sightings.pending == 1
+        assert sightings._paused_until == self.clock.now + pause
+        self.clock.advance(pause - 0.01)
+        sightings.flush()
+        assert recorder.calls == 1
+        self.clock.advance(0.01)
+        sightings.flush()
+        assert recorder.calls == 2
+
     def test_503_keeps_the_batch_and_backs_off_up_to_60_seconds(self) -> None:
         unavailable = [refusal(503, "unavailable") for _ in range(8)]
         recorder = failing(*unavailable)
@@ -820,6 +983,59 @@ class TestFailures:
         seen(sightings, request())
         sightings.flush()
         assert sent_items(recorder)[0]["count"] == 1
+
+    @pytest.mark.parametrize(
+        "reply", [b"", CUT_SHORT], ids=["closed-without-response", "body-cut-short"]
+    )
+    def test_a_connection_lost_after_the_report_was_written_drops_the_batch(
+        self, reply: bytes
+    ) -> None:
+        server = Hangup(reply)
+        client = Fingerly(
+            secret_key=SECRET_KEY, endpoint=server.url, allow_insecure_loopback=True
+        )
+        try:
+            sightings = AgentSightings(
+                client,
+                client_ip=lambda incoming: incoming.headers["cf-connecting-ip"],
+                clock=self.clock,
+                background=False,
+            )
+            seen(sightings, request(), times=2)
+            sightings.flush()
+            assert server.received == 1
+            assert sightings.pending == 0
+            assert sightings._paused_until <= self.clock.now
+        finally:
+            client.close()
+            server.stop()
+
+    @pytest.mark.parametrize(
+        "reply", [b"", CUT_SHORT], ids=["closed-without-response", "body-cut-short"]
+    )
+    def test_the_async_flusher_drops_it_too(self, reply: bytes) -> None:
+        server = Hangup(reply)
+
+        async def scenario() -> int:
+            async with AsyncFingerly(
+                secret_key=SECRET_KEY, endpoint=server.url, allow_insecure_loopback=True
+            ) as client:
+                sightings = AsyncAgentSightings(
+                    client,
+                    client_ip=lambda incoming: incoming.headers["cf-connecting-ip"],
+                    clock=self.clock,
+                    background=False,
+                )
+                sightings.report(request(), "text/html")
+                await sightings.flush()
+                assert sightings._paused_until <= self.clock.now
+                return sightings.pending
+
+        try:
+            assert run(scenario()) == 0
+            assert server.received == 1
+        finally:
+            server.stop()
 
     @pytest.mark.parametrize("status", [400, 404, 413, 500, 502, 504])
     def test_any_other_status_drops_the_batch(self, status: int) -> None:

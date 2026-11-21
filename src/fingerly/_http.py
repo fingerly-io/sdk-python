@@ -62,6 +62,43 @@ _DEADLINE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
 _EXPIRED = 0.001
 
 
+class RequestProgress:
+    """Whether a request was written in full, for a caller that must know.
+
+    Set it as :data:`REQUEST_PROGRESS` around a call; the pool marks it from
+    the transport's trace. A replacement transport that reports no trace
+    leaves it unmarked, so the caller cannot tell.
+    """
+
+    __slots__ = ("written",)
+
+    def __init__(self) -> None:
+        self.written = False
+
+    def mark(self, event: str) -> None:
+        if event.endswith(".send_request_body.complete"):
+            self.written = True
+
+
+REQUEST_PROGRESS: contextvars.ContextVar[Optional[RequestProgress]] = (
+    contextvars.ContextVar("fingerly_request_progress", default=None)
+)
+
+
+def _sync_trace(progress: RequestProgress) -> Callable[[str, Any], None]:
+    def trace(event: str, info: Any) -> None:
+        progress.mark(event)
+
+    return trace
+
+
+def _async_trace(progress: RequestProgress) -> Callable[[str, Any], Any]:
+    async def trace(event: str, info: Any) -> None:
+        progress.mark(event)
+
+    return trace
+
+
 class ResponseTooLargeError(Exception):
     """Raised when a response body exceeds :data:`MAX_RESPONSE_BYTES`.
 
@@ -319,9 +356,15 @@ class SyncPool:
             stale.client.close()
         ends = time.monotonic() + (self._deadline if deadline is None else deadline)
         token = _DEADLINE.set(ends)
+        progress = REQUEST_PROGRESS.get()
         try:
             with shard.client.stream(
-                method, url, headers=headers, content=content, params=params
+                method,
+                url,
+                headers=headers,
+                content=content,
+                params=params,
+                extensions={"trace": _sync_trace(progress)} if progress else None,
             ) as response:
                 _refuse_declared_oversize(response)
                 chunks: list[bytes] = []
@@ -401,11 +444,15 @@ class AsyncPool:
         if self._shards.closed:
             raise RuntimeError("The Fingerly client has been closed")
         shard, idle = self._shards.acquire()
+        progress = REQUEST_PROGRESS.get()
+        extensions = {"trace": _async_trace(progress)} if progress else None
         try:
             for stale in idle:
                 await stale.client.aclose()
             return await asyncio.wait_for(
-                _read_async(shard.client, method, url, headers, content, params),
+                _read_async(
+                    shard.client, method, url, headers, content, params, extensions
+                ),
                 self._deadline if deadline is None else deadline,
             )
         except asyncio.TimeoutError:
@@ -432,9 +479,15 @@ async def _read_async(
     headers: Optional[Headers],
     content: Optional[bytes],
     params: Optional[Mapping[str, str]],
+    extensions: Optional[dict[str, Any]] = None,
 ) -> Reply:
     async with client.stream(
-        method, url, headers=headers, content=content, params=params
+        method,
+        url,
+        headers=headers,
+        content=content,
+        params=params,
+        extensions=extensions,
     ) as response:
         _refuse_declared_oversize(response)
         chunks: list[bytes] = []
