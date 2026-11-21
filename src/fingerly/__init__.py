@@ -1,4 +1,4 @@
-"""Server-side Fingerly SDK: event reads and webhook verification.
+"""Server-side Fingerly SDK: event reads, webhook verification and agent sightings.
 
 Two clients share one API: :class:`Fingerly` for synchronous code such as
 Django and Flask, and :class:`AsyncFingerly` for asyncio code such as FastAPI
@@ -13,6 +13,8 @@ Example:
 from __future__ import annotations
 
 from ._client import (
+    Agents,
+    AsyncAgents,
     AsyncDeviceCheck,
     AsyncEvents,
     AsyncFingerly,
@@ -47,7 +49,11 @@ from ._errors import (
     FingerlyTimeoutError,
 )
 from ._models import (
+    AGENT_UNKNOWN,
     SIGNAL_NAMES,
+    AgentAnswer,
+    AgentSighting,
+    AgentSightingsResult,
     AIAgent,
     AIVerification,
     Attestation,
@@ -61,10 +67,13 @@ from ._models import (
     VerifyResult,
 )
 from ._proxy import FingerlyProxy, ProxyRequest
+from ._sightings import AgentSightings, AsyncAgentSightings
+from ._sightings_middleware import SightingsASGI, SightingsWSGI
 from ._version import __version__
 from ._webhooks import verify_webhook
 
 __all__ = [
+    "AGENT_UNKNOWN",
     "SIGNAL_NAMES",
     "AIAgent",
     "AIPurpose",
@@ -72,6 +81,13 @@ __all__ = [
     "AIVerification",
     "AIVerificationMethod",
     "AIVerificationResult",
+    "AgentAnswer",
+    "AgentSighting",
+    "AgentSightings",
+    "AgentSightingsResult",
+    "Agents",
+    "AsyncAgentSightings",
+    "AsyncAgents",
     "AsyncDeviceCheck",
     "AsyncEvents",
     "AsyncFingerly",
@@ -101,6 +117,8 @@ __all__ = [
     "FingerlyProxy",
     "FingerlyTimeoutError",
     "ProxyRequest",
+    "SightingsASGI",
+    "SightingsWSGI",
     "Signal",
     "SuspectLevel",
     "VerifyReason",

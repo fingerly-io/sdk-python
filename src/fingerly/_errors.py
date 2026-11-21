@@ -47,6 +47,9 @@ class FingerlyAPIError(FingerlyError):
         retry_after: Seconds to wait before retrying, from ``Retry-After``
             on a 429, a 503 or a ``404 event_pending``, or None when the
             response did not say.
+        rate_limit_scope: Which limit refused a 429, from
+            ``Fingerly-RateLimit-Scope``, such as ``daily`` for the daily
+            allowance of agent sightings; None when the response did not say.
     """
 
     def __init__(
@@ -58,6 +61,7 @@ class FingerlyAPIError(FingerlyError):
         details: Any = None,
         request_id: Optional[str] = None,
         retry_after: Optional[float] = None,
+        rate_limit_scope: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.status = status
@@ -65,6 +69,7 @@ class FingerlyAPIError(FingerlyError):
         self.details = details
         self.request_id = request_id
         self.retry_after = retry_after
+        self.rate_limit_scope = rate_limit_scope
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(status={self.status}, code={self.code!r})"

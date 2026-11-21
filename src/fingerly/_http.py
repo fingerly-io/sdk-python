@@ -299,8 +299,11 @@ class SyncPool:
         headers: Optional[Headers] = None,
         content: Optional[bytes] = None,
         params: Optional[Mapping[str, str]] = None,
+        deadline: Optional[float] = None,
     ) -> Reply:
         """Sends one request and reads its body, all within the deadline.
+
+        ``deadline`` replaces the pool's own, in seconds, for this request.
 
         Raises:
             httpx.TimeoutException: When the deadline passes.
@@ -314,8 +317,8 @@ class SyncPool:
             shard, idle = self._shards.acquire()
         for stale in idle:
             stale.client.close()
-        deadline = time.monotonic() + self._deadline
-        token = _DEADLINE.set(deadline)
+        ends = time.monotonic() + (self._deadline if deadline is None else deadline)
+        token = _DEADLINE.set(ends)
         try:
             with shard.client.stream(
                 method, url, headers=headers, content=content, params=params
@@ -328,7 +331,7 @@ class SyncPool:
                     if size > MAX_RESPONSE_BYTES:
                         raise ResponseTooLargeError(response.status_code)
                     chunks.append(chunk)
-                    if time.monotonic() > deadline:
+                    if time.monotonic() > ends:
                         raise httpx.ReadTimeout("deadline exceeded")
                 return Reply(response.status_code, response.headers, b"".join(chunks))
         finally:
@@ -383,8 +386,11 @@ class AsyncPool:
         headers: Optional[Headers] = None,
         content: Optional[bytes] = None,
         params: Optional[Mapping[str, str]] = None,
+        deadline: Optional[float] = None,
     ) -> Reply:
         """Sends one request and reads its body, all within the deadline.
+
+        ``deadline`` replaces the pool's own, in seconds, for this request.
 
         Raises:
             httpx.TimeoutException: When the deadline passes.
@@ -400,7 +406,7 @@ class AsyncPool:
                 await stale.client.aclose()
             return await asyncio.wait_for(
                 _read_async(shard.client, method, url, headers, content, params),
-                self._deadline,
+                self._deadline if deadline is None else deadline,
             )
         except asyncio.TimeoutError:
             raise httpx.ReadTimeout("deadline exceeded") from None

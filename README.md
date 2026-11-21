@@ -21,7 +21,7 @@
 
 ## What is this
 
-`fingerly` is the server-side Python package for [Fingerly](https://fingerly.io), which identifies the device behind every web and app session and scores how suspicious it is. Use it to protect signups, logins and payments: read the event the browser SDK produced with a server-only secret key, verify webhook signatures, and relay the browser SDK's traffic through your own domain.
+`fingerly` is the server-side Python package for [Fingerly](https://fingerly.io), which identifies the device behind every web and app session and scores how suspicious it is. Use it to protect signups, logins and payments: read the event the browser SDK produced with a server-only secret key, verify webhook signatures, relay the browser SDK's traffic through your own domain, and report the requests your server served so AI crawlers that never run JavaScript are seen.
 
 Two clients share one API: `Fingerly` for synchronous code such as Django and Flask, and `AsyncFingerly` for asyncio code such as FastAPI and Starlette. Python 3.9 or newer. One runtime dependency, `httpx`. The proxy serves both ASGI and WSGI, so it mounts under either.
 
@@ -104,6 +104,7 @@ Full documentation: [docs.fingerly.io/docs/sdks/python](https://docs.fingerly.io
 | Read or write an iOS device's DeviceCheck bits | [Read and write Apple DeviceCheck bits](#read-and-write-apple-devicecheck-bits) |
 | Check a webhook signature | [Verify webhooks](#verify-webhooks) |
 | Keep identification working behind content blockers | [First-party proxy](#first-party-proxy) |
+| See AI crawlers that never run your page's JavaScript | [Agent sightings](#agent-sightings) |
 | Mount the proxy in FastAPI, Django or Flask | [Framework guides](#framework-guides) |
 | Tune deadlines, pools and the API version | [Timeouts](#timeouts), [Connections](#connections), [API version](#api-version) |
 
@@ -113,6 +114,7 @@ Full documentation: [docs.fingerly.io/docs/sdks/python](https://docs.fingerly.io
 - [Read and write Apple DeviceCheck bits](#read-and-write-apple-devicecheck-bits)
 - [Verify webhooks](#verify-webhooks)
 - [First-party proxy](#first-party-proxy)
+- [Agent sightings](#agent-sightings)
 - [Framework guides](#framework-guides)
 - [Timeouts](#timeouts)
 - [Connections](#connections)
@@ -366,6 +368,98 @@ proxy = FingerlyProxy(
     allow_insecure_loopback=True,
 )
 ```
+
+## Agent sightings
+
+AI crawlers and fetchers such as GPTBot or ClaudeBot usually fetch a page without running its JavaScript, so the browser SDK never sees them. `AgentSightings` reports the requests your server served to Fingerly, which decides what sent each one, and remembers the answers so your code can ask about a later request without waiting on the network. The console shows the counts with the agents your pages identified.
+
+The SDK forwards raw input only. It never classifies a user agent, never checks an address against a list and never filters requests by what the visitor claims to be.
+
+### Mount it
+
+Wrap your application once per process. It needs a secret key client and the same kind of `client_ip` callback as the [proxy](#resolving-the-client-ip): one trusted address per request, never the left-most `X-Forwarded-For` value.
+
+```python
+import os
+
+from fingerly import AgentSightings, Fingerly
+
+fingerly = Fingerly(secret_key=os.environ["FINGERLY_SECRET_KEY"])
+sightings = AgentSightings(
+    fingerly,
+    client_ip=lambda request: (
+        request.headers.get("cf-connecting-ip") or request.peer_host
+    ),
+)
+
+# Flask, Django's sync stack, any WSGI app:
+app.wsgi_app = sightings.wsgi(app.wsgi_app)
+```
+
+For asyncio applications, use `AsyncAgentSightings` with an `AsyncFingerly` client and wrap the ASGI app:
+
+```python
+from fingerly import AsyncAgentSightings, AsyncFingerly
+
+fingerly = AsyncFingerly(secret_key=os.environ["FINGERLY_SECRET_KEY"])
+sightings = AsyncAgentSightings(fingerly, client_ip=client_ip)
+app = sightings.asgi(app)  # FastAPI, Starlette, Django ASGI
+```
+
+`AgentSightings.asgi` works too, with its flusher on a thread instead of a task. Where neither middleware fits, call `sightings.report(request, content_type)` after each response.
+
+### Which responses are reported
+
+By default, every response with a `Content-Type` of `text/html` or `application/xhtml+xml`, and every request for `/robots.txt`, `/llms.txt` or `/llms-full.txt`, whatever the status. Static files, API routes and health checks are left out. Widen or narrow that by your own resources, never by visitor:
+
+```python
+sightings = AgentSightings(
+    fingerly,
+    client_ip=client_ip,
+    include_paths=["/feeds/"],  # reported whatever their content type
+    exclude_paths=["/admin"],  # never reported; wins over everything
+    content_types=["text/html", "application/rss+xml"],  # replaces the default
+)
+```
+
+Paths are matched as the mounted application sees them, as for the proxy.
+
+### Ask about a request
+
+`lookup` answers from memory: never a network call, never an exception. It takes a `ProxyRequest`, an ASGI scope, a WSGI environ, or a Starlette, FastAPI, Django or Flask request. Until the server has answered for an earlier request with the same user agent, address and `Signature-Agent`, it returns `AGENT_UNKNOWN`. Serve that as usual.
+
+```python
+from fingerly import AGENT_UNKNOWN, AIVerificationResult, VisitorKind
+
+answer = sightings.lookup(request)
+if answer is AGENT_UNKNOWN:
+    pass  # not answered yet: serve as usual
+elif answer.visitor_kind == VisitorKind.AI_BOT and answer.ai is not None:
+    if answer.ai.verification.result == AIVerificationResult.FAIL:
+        ...  # it claims to be an agent its operator does not vouch for
+```
+
+Each answer holds `ttl`, `visitor_kind`, `agent` and, for an AI agent, `ai` with the same fields as on events. A signed request (Web Bot Auth) is checked by the server every time, so `lookup` never remembers it.
+
+### What is sent
+
+For each reported request: the `User-Agent` header, the address from `client_ip`, the `Host`, the method, the Web Bot Auth `Signature`, `Signature-Input` and `Signature-Agent` headers when present, and how many times that same request was seen. A user agent over 4096 bytes is not reported, a signature header over 4096 bytes is left out, and a request whose address cannot be resolved is not reported.
+
+Never sent, and never logged: the path, the query string, cookies, `Authorization`, any other header, the body or the response.
+
+### Memory and failures
+
+Answers live in a per-process LRU of 4096 entries by default (`cache_size`, at most 65536), a few hundred bytes each: about 1.5 MB at the default. Reports wait in a buffer of at most 1000 items, where repeats of the same request become one item with a count. It is sent in batches of up to 200 items, when it reaches 200 items or 64 KiB or 2 seconds after its oldest item, with one report in flight and a 5 second deadline. When the buffer is full, new requests are not reported and `sightings.dropped` counts them.
+
+Every failure fails open: requests keep being served and `lookup` keeps answering from memory or with `AGENT_UNKNOWN`. A `429` pauses reporting for its `Retry-After` while the buffer keeps counting, a `503` or an unreachable API is retried with backoff from 1 to 60 seconds, and a rejected key pauses reporting for 60 seconds. Problems are logged on the `fingerly.agents` logger, at most once a minute each.
+
+### Processes, threads and serverless
+
+`AgentSightings` sends from a daemon thread, which never keeps the process alive. A forked worker (gunicorn, uWSGI) starts with an empty buffer and its own thread; answers already remembered are kept. `AsyncAgentSightings` sends from a task on the loop that serves your requests.
+
+Call `close()` (or `await aclose()`) on shutdown to send what is pending. Where the process is frozen between invocations, build it with `background=False` and call `flush()` (or `await flush()`) before each invocation ends.
+
+The call underneath is `fingerly.agents.sightings([...])`, taking `AgentSighting` items and returning `AgentSightingsResult`. A refusal raises `FingerlyAPIError` with `retry_after` and, on a `429`, `rate_limit_scope` (`daily` for the daily allowance).
 
 ## Framework guides
 

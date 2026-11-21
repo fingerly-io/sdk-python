@@ -130,10 +130,17 @@ class Headers(Mapping[str, str]):
 
     def __init__(self, items: Iterable[tuple[str, str]]) -> None:
         merged: dict[str, str] = {}
+        first: dict[str, str] = {}
         for name, value in items:
             key = name.lower()
             merged[key] = f"{merged[key]}, {value}" if key in merged else value
+            first.setdefault(key, value)
         self._items = merged
+        self._first = first
+
+    def first(self, key: str, default: str = "") -> str:
+        """The first value of a header that may be repeated, or ``default``."""
+        return self._first.get(key.lower(), default)
 
     def __getitem__(self, key: str) -> str:
         return self._items[key.lower()]

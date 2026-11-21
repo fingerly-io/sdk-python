@@ -324,6 +324,134 @@ class VerifyResult:
     event: Optional[Event] = None
 
 
+@dataclass(frozen=True)
+class AgentSighting:
+    """One request your server served, reported as raw input.
+
+    Sent by :meth:`Agents.sightings`. Nothing is decided about the visitor
+    before it is sent: the server classifies it.
+
+    Attributes:
+        user_agent: The ``User-Agent`` header as received, ``""`` when the
+            request had none. At most 4096 bytes.
+        client_ip: The visitor's address from infrastructure you trust: one
+            IPv4 or IPv6 literal, never a forwarded list.
+        host: The ``Host`` the request was sent to.
+        method: The request method; the server reads ``GET`` when absent.
+        signature: The ``Signature`` header, when the request had one.
+        signature_input: The ``Signature-Input`` header, when it had one.
+        signature_agent: The ``Signature-Agent`` header, when it had one.
+        count: How many times this exact request was served since it was last
+            reported, this one included; the server reads 1 when absent.
+    """
+
+    user_agent: str
+    client_ip: str
+    host: Optional[str] = None
+    method: Optional[str] = None
+    signature: Optional[str] = None
+    signature_input: Optional[str] = None
+    signature_agent: Optional[str] = None
+    count: Optional[int] = None
+
+    def to_wire(self) -> dict[str, Any]:
+        """The JSON object the API reads, without the fields left unset."""
+        wire: dict[str, Any] = {
+            "user_agent": self.user_agent,
+            "client_ip": self.client_ip,
+        }
+        for name in (
+            "host",
+            "method",
+            "signature",
+            "signature_input",
+            "signature_agent",
+            "count",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                wire[name] = value
+        return wire
+
+
+@dataclass(frozen=True)
+class AgentAnswer:
+    """What the server said sent one reported request.
+
+    Compare ``visitor_kind`` with :class:`VisitorKind` members and
+    ``ai.verification.result`` with :class:`AIVerificationResult` members.
+    :data:`AGENT_UNKNOWN` is the answer for a request the server has not
+    answered yet: serve it as usual.
+
+    Attributes:
+        ttl: Seconds the answer may be reused for the same user agent, address
+            and ``Signature-Agent``; 0 for a signed request, checked every time.
+        visitor_kind: ``human``, ``ai_bot``, ``automation`` or
+            ``search_crawler``, kept as sent so a newer value still parses;
+            ``""`` only on :data:`AGENT_UNKNOWN`.
+        agent: The agent's name where the server knows it, such as ``GPTBot``.
+        ai: The AI agent, present only when ``visitor_kind`` is
+            ``VisitorKind.AI_BOT``.
+    """
+
+    ttl: int
+    visitor_kind: str
+    agent: Optional[str] = None
+    ai: Optional[AIAgent] = None
+
+    @property
+    def known(self) -> bool:
+        """False for :data:`AGENT_UNKNOWN`, True for a server answer."""
+        return self is not AGENT_UNKNOWN
+
+
+#: The answer when the server has not answered for a request yet, or it could
+#: not be reported. Treat it as "serve as usual". Compare with ``is``.
+AGENT_UNKNOWN = AgentAnswer(ttl=0, visitor_kind="")
+
+
+@dataclass(frozen=True)
+class AgentSightingsResult:
+    """The server's answer to :meth:`Agents.sightings`.
+
+    Attributes:
+        rules_version: Names the classification rules. When it changes, every
+            remembered answer is stale.
+        items: One answer per reported request, in the order sent.
+    """
+
+    rules_version: str
+    items: Sequence[AgentAnswer]
+
+
+def parse_agent_sightings(payload: Mapping[str, Any]) -> AgentSightingsResult:
+    """Builds :class:`AgentSightingsResult` from a sightings answer.
+
+    Raises:
+        FingerlyError: If ``rules_version`` or ``items`` is missing, or an item
+            lacks ``ttl`` or ``visitor_kind``.
+    """
+    rules_version = _require(payload, "rules_version", str)
+    items = _require(payload, "items", list)
+    answers = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            raise FingerlyError("The Fingerly API response has an unreadable item")
+        ttl = item.get("ttl")
+        if not isinstance(ttl, int) or isinstance(ttl, bool):
+            raise FingerlyError("The Fingerly API response is missing 'ttl'")
+        agent = item.get("agent")
+        answers.append(
+            AgentAnswer(
+                ttl=ttl,
+                visitor_kind=_require(item, "visitor_kind", str),
+                agent=agent if isinstance(agent, str) and agent else None,
+                ai=_parse_ai(item.get("ai")),
+            )
+        )
+    return AgentSightingsResult(rules_version=rules_version, items=tuple(answers))
+
+
 def parse_consume(payload: Mapping[str, Any]) -> ConsumeResult:
     """Builds :class:`ConsumeResult` from a consume answer."""
     return ConsumeResult(
