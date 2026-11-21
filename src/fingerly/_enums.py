@@ -31,7 +31,7 @@ class Signal(_StrEnum):
 
     ``EventTrigger.signal`` is one of the group names (such as ``VPN``,
     ``BOT`` or ``ATTESTATION_FAILED``); archived risk reports also carry the
-    raw detector names that feed each group (such as ``VPN_TIMEZONE``).
+    raw detector names that feed each group (such as ``VPN_PUBLIC``).
     """
 
     TOR = "tor"
@@ -44,7 +44,6 @@ class Signal(_StrEnum):
     RESIDENTIAL_PROXY_HIGH_CONFIDENCE = "residential_proxy_high_confidence"
     VPN = "vpn"
     VPN_PUBLIC = "vpn_public"
-    VPN_TIMEZONE = "vpn_timezone"
     VPN_RELAY = "vpn_relay"
     VPN_MOBILE = "vpn_mobile"
     VPN_OS_MISMATCH = "vpn_os_mismatch"
@@ -85,11 +84,13 @@ class Signal(_StrEnum):
     TAMPERING = "tampering"
     ANTIDETECT_BROWSER = "antidetect_browser"
     FINGERPRINT_SUPPRESSED = "fingerprint_suppressed"
+    IDENTITY_OBFUSCATED = "identity_obfuscated"
     DEVELOPER_TOOLS = "developer_tools"
     REMOTE_CONTROL = "remote_control"
     BOT = "bot"
     AUTOMATION = "automation"
     BAD_BOT = "bad_bot"
+    AI_SPOOFED = "ai_spoofed"
     FETCH_METADATA_MISSING = "fetch_metadata_missing"
     WEB_TICKET_MISSING = "web_ticket_missing"
     WEB_TICKET_INVALID = "web_ticket_invalid"

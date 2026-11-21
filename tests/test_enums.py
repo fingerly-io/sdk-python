@@ -43,6 +43,7 @@ from fingerly._models import parse_document, parse_event
 # server/domain/risk/signals.go (Signal) and groups.go (Group).
 SERVER_SIGNALS = {
     "active_call",
+    "ai_spoofed",
     "android_emulator",
     "antidetect_browser",
     "anycast_ip",
@@ -72,6 +73,7 @@ SERVER_SIGNALS = {
     "frida_detected",
     "geo_mismatch",
     "high_activity",
+    "identity_obfuscated",
     "incognito",
     "incognito_mode",
     "ios_simulator",
@@ -112,7 +114,6 @@ SERVER_SIGNALS = {
     "vpn_os_mismatch",
     "vpn_public",
     "vpn_relay",
-    "vpn_timezone",
     "web_ticket_invalid",
     "web_ticket_missing",
 }
