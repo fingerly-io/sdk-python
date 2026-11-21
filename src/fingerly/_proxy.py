@@ -108,6 +108,12 @@ CLIENT_METADATA_HEADERS = (
     "sec-ch-ua-platform",
 )
 
+#: Web Bot Auth headers an AI agent's browser signs the request with,
+#: forwarded when present and at most 4096 bytes. The API ignores a longer
+#: one, so it is dropped here rather than refused.
+SIGNATURE_HEADERS = ("signature", "signature-input", "signature-agent")
+MAX_SIGNATURE_HEADER_BYTES = 4096
+
 CORS_ALLOW_HEADERS = "content-type, x-api-key, idempotency-key, x-fingerly-sdk-platform"
 CORS_EXPOSE_HEADERS = "x-request-id, ratelimit-limit, ratelimit-remaining, retry-after"
 MISSING_ORIGIN_BODY = (
@@ -513,6 +519,11 @@ class FingerlyProxy:
         for name in CLIENT_METADATA_HEADERS:
             value = request.headers.get(name)
             if value:
+                headers[name] = value
+        for name in SIGNATURE_HEADERS:
+            value = request.headers.get(name)
+            # Decoded as Latin-1 by both standards: one character per byte.
+            if value and len(value) <= MAX_SIGNATURE_HEADER_BYTES:
                 headers[name] = value
         return headers
 
