@@ -125,9 +125,19 @@ class AIVerification:
 class AIAgent:
     """The AI agent behind an ``ai_bot`` event.
 
-    The identity comes from the user agent, which any client can copy, and is
-    not verified yet. Closed sets stay typed ``str`` like the other server
-    fields, so a value a newer server adds still parses.
+    The agent is named by a Web Bot Auth signature when the request carried
+    one, otherwise by its user agent. ``verification`` says how far that was
+    checked: ``AIVerificationMethod.SIGNATURE`` (the operator's published key
+    signed the request) or ``AIVerificationMethod.IP_LIST`` (the address is
+    inside the operator's published ranges), with result
+    ``AIVerificationResult.PASS``, ``AIVerificationResult.FAIL`` (the name was
+    borrowed), or ``AIVerificationResult.NOT_ATTEMPTED`` with method
+    ``AIVerificationMethod.NONE`` (the operator publishes nothing to check
+    against, or it could not be checked; the name is then only the client's
+    claim).
+
+    Closed sets stay typed ``str`` like the other server fields, so a value a
+    newer server adds still parses.
 
     Attributes:
         name: The agent as its operator names it, such as ``ChatGPT-User``.
