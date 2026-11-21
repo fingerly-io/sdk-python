@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 
 FILES = ("openapi.json", "fixtures.json")
+#: Copied as they are: the manifest does not hash them.
+COPIED = ("agent-sightings-vectors.json",)
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -43,6 +45,8 @@ def main(argv: list[str]) -> int:
             print(f"Invalid contract hash: {name}", file=sys.stderr)
             return 1
         outputs[name] = raw
+    for name in COPIED:
+        outputs[name] = (source / name).read_bytes()
     outputs["manifest.json"] = (source / "manifest.json").read_bytes()
 
     for name, raw in outputs.items():
