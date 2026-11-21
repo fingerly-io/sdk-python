@@ -107,6 +107,48 @@ class EventDocument:
 
 
 @dataclass(frozen=True)
+class AIVerification:
+    """How an AI agent's claimed identity was checked, and what that found.
+
+    Attributes:
+        method: ``signature``, ``ip_list``, ``reverse_dns`` or ``none``, an
+            :class:`AIVerificationMethod` value.
+        result: ``pass``, ``fail`` or ``not_attempted``, an
+            :class:`AIVerificationResult` value.
+    """
+
+    method: str
+    result: str
+
+
+@dataclass(frozen=True)
+class AIAgent:
+    """The AI agent behind an ``ai_bot`` event.
+
+    The identity comes from the user agent, which any client can copy, and is
+    not verified yet. Closed sets stay typed ``str`` like the other server
+    fields, so a value a newer server adds still parses.
+
+    Attributes:
+        name: The agent as its operator names it, such as ``ChatGPT-User``.
+        provider: The company that operates it, such as ``OpenAI``. An open
+            string, not an enum.
+        purpose: What its traffic is for, an :class:`AIPurpose` value.
+        runtime: Where it runs, an :class:`AIRuntime` value.
+        declared: True when the agent named itself, in its user agent or a
+            signature.
+        verification: How its claim was checked, and what that found.
+    """
+
+    name: str
+    provider: str
+    purpose: str
+    runtime: str
+    declared: bool
+    verification: AIVerification
+
+
+@dataclass(frozen=True)
 class Event:
     """A stored identification event.
 
@@ -122,11 +164,14 @@ class Event:
     Closed string sets stay typed ``str`` and hold the value as sent, so a
     value a newer server adds still parses. Compare them with the enum
     members: ``state`` with :class:`EventState`, ``environment`` with
-    :class:`Environment`, ``suspect_level`` with :class:`SuspectLevel`.
+    :class:`Environment`, ``suspect_level`` with :class:`SuspectLevel`,
+    ``visitor_kind`` with :class:`VisitorKind`.
 
     Attributes:
         project_id: The Fingerly project the event belongs to, as a UUID
             string. ``None`` when an older server did not send it.
+        ai: The AI agent, present only when ``visitor_kind`` is
+            ``VisitorKind.AI_BOT``; ``None`` otherwise.
         raw: The decoded response body. Fields this SDK does not declare are
             readable as attributes through it.
     """
@@ -160,6 +205,7 @@ class Event:
     os: Optional[str] = None
     device_kind: Optional[str] = None
     visitor_kind: Optional[str] = None
+    ai: Optional[AIAgent] = None
     document: Optional[Mapping[str, Any]] = None
     raw: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
@@ -406,6 +452,7 @@ def parse_event(payload: Mapping[str, Any]) -> Event:
         os=payload.get("os"),
         device_kind=payload.get("device_kind"),
         visitor_kind=payload.get("visitor_kind"),
+        ai=_parse_ai(payload.get("ai")),
         document=payload.get("document"),
         raw=payload,
     )
@@ -502,6 +549,31 @@ def _parse_attestation(payload: Mapping[str, Any]) -> Attestation:
         device_check=payload.get("device_check"),
         play_integrity=play if isinstance(play, Mapping) else None,
         raw=payload,
+    )
+
+
+def _parse_ai(payload: Any) -> Optional[AIAgent]:
+    """Builds the :class:`AIAgent` of an ``ai_bot`` event, or None when absent.
+
+    Values are kept as sent, so an unknown purpose, runtime or verification
+    value parses.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    verification_raw = payload.get("verification")
+    verification: Mapping[str, Any] = (
+        verification_raw if isinstance(verification_raw, Mapping) else {}
+    )
+    return AIAgent(
+        name=str(payload.get("name", "")),
+        provider=str(payload.get("provider", "")),
+        purpose=str(payload.get("purpose", "")),
+        runtime=str(payload.get("runtime", "")),
+        declared=bool(payload.get("declared", False)),
+        verification=AIVerification(
+            method=str(verification.get("method", "")),
+            result=str(verification.get("result", "")),
+        ),
     )
 
 

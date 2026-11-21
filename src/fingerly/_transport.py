@@ -78,6 +78,9 @@ def list_params(
     limit: Optional[int],
     visitor: Optional[str],
     level: Optional[str],
+    kind: Optional[str] = None,
+    ai_provider: Optional[str] = None,
+    ai_purpose: Optional[str] = None,
 ) -> dict[str, str]:
     """Builds the query for a listing, omitting filters the caller left unset.
 
@@ -100,6 +103,12 @@ def list_params(
         params["visitor"] = str(visitor)
     if level is not None:
         params["level"] = str(level)
+    if kind is not None:
+        params["kind"] = str(kind)
+    if ai_provider is not None:
+        params["ai_provider"] = str(ai_provider)
+    if ai_purpose is not None:
+        params["ai_purpose"] = str(ai_purpose)
     return params
 
 

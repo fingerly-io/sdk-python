@@ -21,6 +21,10 @@ from ._client import (
     Fingerly,
 )
 from ._enums import (
+    AIPurpose,
+    AIRuntime,
+    AIVerificationMethod,
+    AIVerificationResult,
     AttestationState,
     AttestationStatus,
     AttestSkippedReason,
@@ -30,6 +34,7 @@ from ._enums import (
     Signal,
     SuspectLevel,
     VerifyReason,
+    VisitorKind,
     WebhookEventType,
 )
 from ._errors import (
@@ -43,6 +48,8 @@ from ._errors import (
 )
 from ._models import (
     SIGNAL_NAMES,
+    AIAgent,
+    AIVerification,
     Attestation,
     ConsumeResult,
     DeviceCheckBits,
@@ -59,6 +66,12 @@ from ._webhooks import verify_webhook
 
 __all__ = [
     "SIGNAL_NAMES",
+    "AIAgent",
+    "AIPurpose",
+    "AIRuntime",
+    "AIVerification",
+    "AIVerificationMethod",
+    "AIVerificationResult",
     "AsyncDeviceCheck",
     "AsyncEvents",
     "AsyncFingerly",
@@ -92,6 +105,7 @@ __all__ = [
     "SuspectLevel",
     "VerifyReason",
     "VerifyResult",
+    "VisitorKind",
     "WebhookEventType",
     "__version__",
     "verify_webhook",

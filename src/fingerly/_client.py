@@ -244,6 +244,9 @@ class Events:
         limit: int = 10,
         visitor: Optional[str] = None,
         level: Optional[str] = None,
+        kind: Optional[str] = None,
+        ai_provider: Optional[str] = None,
+        ai_purpose: Optional[str] = None,
     ) -> EventPage:
         """Lists events within the retention window, newest first.
 
@@ -255,12 +258,20 @@ class Events:
             visitor: Restrict to one exact visitor id.
             level: Restrict to ``low``, ``medium`` or ``high``; a
                 :class:`SuspectLevel` member works too.
+            kind: Restrict to one visitor kind, a :class:`VisitorKind`
+                member such as ``VisitorKind.AI_BOT``.
+            ai_provider: Restrict to one AI agent operator, exactly as events
+                name it (case sensitive), such as ``OpenAI``.
+            ai_purpose: Restrict to one AI agent purpose, an
+                :class:`AIPurpose` member such as ``AIPurpose.USER_FETCH``.
 
         Raises:
             TypeError: If a bound, page or limit is unusable.
             FingerlyAPIError: On any non-2xx response.
         """
-        params = list_params(from_, to, page, limit, visitor, level)
+        params = list_params(
+            from_, to, page, limit, visitor, level, kind, ai_provider, ai_purpose
+        )
         return parse_page(self._client._request("/events", params))
 
 
@@ -324,12 +335,17 @@ class AsyncEvents:
         limit: int = 10,
         visitor: Optional[str] = None,
         level: Optional[str] = None,
+        kind: Optional[str] = None,
+        ai_provider: Optional[str] = None,
+        ai_purpose: Optional[str] = None,
     ) -> EventPage:
         """Lists events within the retention window, newest first.
 
         See :meth:`Events.list`; this coroutine takes the same arguments.
         """
-        params = list_params(from_, to, page, limit, visitor, level)
+        params = list_params(
+            from_, to, page, limit, visitor, level, kind, ai_provider, ai_purpose
+        )
         return parse_page(await self._client._request("/events", params))
 
 

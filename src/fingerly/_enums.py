@@ -146,6 +146,69 @@ class Environment(_StrEnum):
     DEVELOPMENT = "development"
 
 
+class VisitorKind(_StrEnum):
+    """What sort of client made the request, as in ``Event.visitor_kind``."""
+
+    HUMAN = "human"
+    AI_BOT = "ai_bot"
+    AUTOMATION = "automation"
+    SEARCH_CRAWLER = "search_crawler"
+
+
+class AIPurpose(_StrEnum):
+    """What an AI agent's operator says its traffic is for, ``AIAgent.purpose``.
+
+    - ``TRAINING``: collecting content to train models.
+    - ``SEARCH``: indexing for an AI answer or search product.
+    - ``USER_FETCH``: reading a page a person asked an assistant to read.
+    - ``AGENT``: driving a browser on a person's behalf.
+    """
+
+    TRAINING = "training"
+    SEARCH = "search"
+    USER_FETCH = "user_fetch"
+    AGENT = "agent"
+
+
+class AIRuntime(_StrEnum):
+    """Where an AI agent runs, ``AIAgent.runtime``.
+
+    ``PROVIDER_CLOUD`` is the operator's own infrastructure,
+    ``HOSTED_BROWSER`` a third party's cloud browser and ``USER_DEVICE`` a
+    person's own browser.
+    """
+
+    PROVIDER_CLOUD = "provider_cloud"
+    HOSTED_BROWSER = "hosted_browser"
+    USER_DEVICE = "user_device"
+
+
+class AIVerificationMethod(_StrEnum):
+    """How an AI agent's claimed identity was checked, ``AIVerification.method``.
+
+    ``SIGNATURE`` (a signed request), ``IP_LIST`` (the operator's published
+    address ranges), ``REVERSE_DNS`` (a reverse lookup confirmed forward) or
+    ``NONE``.
+    """
+
+    SIGNATURE = "signature"
+    IP_LIST = "ip_list"
+    REVERSE_DNS = "reverse_dns"
+    NONE = "none"
+
+
+class AIVerificationResult(_StrEnum):
+    """What checking an AI agent's claim found, ``AIVerification.result``.
+
+    ``PASS`` (the claim held), ``FAIL`` (it was checked and did not hold) or
+    ``NOT_ATTEMPTED``.
+    """
+
+    PASS = "pass"  # noqa: S105 (a verification outcome, not a password)
+    FAIL = "fail"
+    NOT_ATTEMPTED = "not_attempted"
+
+
 class AttestationState(_StrEnum):
     """The server's single hardware attestation verdict, ``Attestation.state``."""
 
