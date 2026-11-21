@@ -164,6 +164,15 @@ if event.suspect_level == SuspectLevel.HIGH or Signal.FINGERPRINT_SUPPRESSED in 
 ```
 - `suspect_score` is `None` when the request was not scored, and must not be treated as zero.
 - `project_id` is the UUID string of the Fingerly project the event belongs to, on both `events.get` and the rows of `events.list`; it is `None` when an older server does not send it.
+- `visitor_kind` says what sort of client made the request; compare it with `VisitorKind`. When it is `VisitorKind.AI_BOT`, `event.ai` is an `AIAgent`: `name` and `provider` (plain strings, such as `ChatGPT-User` and `OpenAI`), `purpose` (`AIPurpose`), `runtime` (`AIRuntime`), `declared`, and `verification` with `method` (`AIVerificationMethod`) and `result` (`AIVerificationResult`). On every other event `ai` is `None`. The identity comes from the user agent, which any client can copy, and is not verified yet: `verification` is `none` / `not_attempted`. Only clients that run the browser SDK produce events, so a crawler that does not run JavaScript never appears. `events.list` narrows by `kind`, `ai_provider` (exact and case sensitive, as events name it) and `ai_purpose`, next to `visitor` and `level`:
+
+```python
+from fingerly import AIPurpose, VisitorKind
+
+page = fingerly.events.list(kind=VisitorKind.AI_BOT, ai_purpose=AIPurpose.USER_FETCH)
+for event in page.rows:
+    print(event.ai.provider, event.ai.name)
+```
 - `Event` declares every documented field as an attribute and falls back to the decoded body for fields added later, so a new server field needs no SDK upgrade.
 
 ### Errors
