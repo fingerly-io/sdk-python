@@ -6,6 +6,7 @@ Refresh it with ``python scripts/sync_contract.py``.
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -18,10 +19,18 @@ from referencing.jsonschema import DRAFT202012
 
 from fingerly import (
     SIGNAL_NAMES,
+    AIAgent,
+    AIPurpose,
+    AIRuntime,
+    AIVerification,
+    AIVerificationMethod,
+    AIVerificationResult,
     Attestation,
+    Event,
     EventDocument,
     Fingerly,
     FingerlyAPIError,
+    VisitorKind,
     verify_webhook,
 )
 
@@ -113,6 +122,63 @@ class TestResponseFixtures:
         assert caught.value.status == fixture["status"]
         assert caught.value.code == fixture["body"]["error"]["code"]
         assert caught.value.request_id == fixture["body"].get("request_id")
+
+
+def response(name: str) -> dict[str, Any]:
+    """The response fixture with the given name."""
+    return next(row for row in FIXTURES["responses"] if row["name"] == name)
+
+
+def read_event(body: dict[str, Any]) -> Event:
+    """Reads one event body through the client."""
+    with Fingerly(
+        secret_key=SECRET_KEY,
+        transport=Recorder(json_response(body)).transport(),
+    ) as fingerly:
+        return fingerly.events.get("id")
+
+
+class TestAIAgentFixture:
+    def test_reads_the_ai_agent(self) -> None:
+        event = read_event(response("ai_agent")["body"])
+
+        assert event.visitor_kind == VisitorKind.AI_BOT
+        assert event.ai == AIAgent(
+            name="ChatGPT-User",
+            provider="OpenAI",
+            purpose=AIPurpose.USER_FETCH,
+            runtime=AIRuntime.PROVIDER_CLOUD,
+            declared=True,
+            verification=AIVerification(
+                method=AIVerificationMethod.NONE,
+                result=AIVerificationResult.NOT_ATTEMPTED,
+            ),
+        )
+
+    def test_ai_is_none_on_an_event_that_is_not_an_agent(self) -> None:
+        event = read_event(response("event")["body"])
+
+        assert event.visitor_kind != VisitorKind.AI_BOT
+        assert event.ai is None
+
+    def test_values_a_newer_server_adds_still_parse(self) -> None:
+        body = copy.deepcopy(response("ai_agent")["body"])
+        body["visitor_kind"] = "a_future_kind"
+        body["ai"]["purpose"] = "a_future_purpose"
+        body["ai"]["runtime"] = "a_future_runtime"
+        body["ai"]["verification"] = {
+            "method": "a_future_method",
+            "result": "a_future_result",
+        }
+        event = read_event(body)
+
+        assert event.visitor_kind == "a_future_kind"
+        assert event.ai is not None
+        assert event.ai.purpose == "a_future_purpose"
+        assert event.ai.runtime == "a_future_runtime"
+        assert event.ai.verification == AIVerification(
+            method="a_future_method", result="a_future_result"
+        )
 
 
 class TestWebhookFixtures:

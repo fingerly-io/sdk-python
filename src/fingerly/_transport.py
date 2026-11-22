@@ -7,7 +7,7 @@ share one definition of what a request looks like and what a failure means.
 from __future__ import annotations
 
 import json
-from collections.abc import Generator, Mapping
+from collections.abc import Generator, Mapping, Sequence
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Optional, Union
@@ -22,6 +22,7 @@ from ._errors import (
     FingerlyEventAlreadyConsumedError,
     FingerlyEventPendingError,
 )
+from ._models import AgentSighting
 from ._version import __version__
 
 #: Sent on every request so events record which SDK build made them.
@@ -78,6 +79,9 @@ def list_params(
     limit: Optional[int],
     visitor: Optional[str],
     level: Optional[str],
+    kind: Optional[str] = None,
+    ai_provider: Optional[str] = None,
+    ai_purpose: Optional[str] = None,
 ) -> dict[str, str]:
     """Builds the query for a listing, omitting filters the caller left unset.
 
@@ -100,6 +104,12 @@ def list_params(
         params["visitor"] = str(visitor)
     if level is not None:
         params["level"] = str(level)
+    if kind is not None:
+        params["kind"] = str(kind)
+    if ai_provider is not None:
+        params["ai_provider"] = str(ai_provider)
+    if ai_purpose is not None:
+        params["ai_purpose"] = str(ai_purpose)
     return params
 
 
@@ -183,6 +193,7 @@ def api_error(
     body: bytes,
     secret_key: Union[Secret, str],
     retry_after: Optional[str] = None,
+    rate_limit_scope: Optional[str] = None,
 ) -> FingerlyAPIError:
     """Maps an error response to a redacted :class:`FingerlyAPIError`.
 
@@ -194,6 +205,8 @@ def api_error(
         body: The raw response body, which may be empty or not JSON at all.
         secret_key: The key to redact from anything carried into logs.
         retry_after: The ``Retry-After`` header, when the response had one.
+        rate_limit_scope: The ``Fingerly-RateLimit-Scope`` header, when the
+            response had one.
     """
     code: Optional[str] = None
     details: Any = None
@@ -240,7 +253,25 @@ def api_error(
         details=details,
         request_id=request_id,
         retry_after=seconds,
+        rate_limit_scope=_redact(rate_limit_scope, secret_key)
+        if rate_limit_scope
+        else None,
     )
+
+
+def sightings_body(items: Sequence[AgentSighting]) -> bytes:
+    """Builds the body of an agent sightings report.
+
+    Raises:
+        TypeError: If an item is not an :class:`AgentSighting`. Nothing is
+            sent. The item count is left to the server to judge.
+    """
+    wire = []
+    for item in items:
+        if not isinstance(item, AgentSighting):
+            raise TypeError("items must be AgentSighting values")
+        wire.append(item.to_wire())
+    return json.dumps({"items": wire}, separators=(",", ":")).encode()
 
 
 def _consumed_at(payload: Any) -> Optional[str]:

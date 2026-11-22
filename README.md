@@ -21,7 +21,7 @@
 
 ## What is this
 
-`fingerly` is the server-side Python package for [Fingerly](https://fingerly.io), which identifies the device behind every web and app session and scores how suspicious it is. Use it to protect signups, logins and payments: read the event the browser SDK produced with a server-only secret key, verify webhook signatures, and relay the browser SDK's traffic through your own domain.
+`fingerly` is the server-side Python package for [Fingerly](https://fingerly.io), which identifies the device behind every web and app session and scores how suspicious it is. Use it to protect signups, logins and payments: read the event the browser SDK produced with a server-only secret key, verify webhook signatures, relay the browser SDK's traffic through your own domain, and report the requests your server served so AI crawlers that never run JavaScript are seen.
 
 Two clients share one API: `Fingerly` for synchronous code such as Django and Flask, and `AsyncFingerly` for asyncio code such as FastAPI and Starlette. Python 3.9 or newer. One runtime dependency, `httpx`. The proxy serves both ASGI and WSGI, so it mounts under either.
 
@@ -32,7 +32,7 @@ Two clients share one API: `Fingerly` for synchronous code such as Django and Fl
 **2. Install.**
 
 ```sh
-pip install "fingerly>=0.4.1"
+pip install "fingerly>=0.5.0"
 ```
 
 **3. Read an event.**
@@ -104,6 +104,7 @@ Full documentation: [docs.fingerly.io/docs/sdks/python](https://docs.fingerly.io
 | Read or write an iOS device's DeviceCheck bits | [Read and write Apple DeviceCheck bits](#read-and-write-apple-devicecheck-bits) |
 | Check a webhook signature | [Verify webhooks](#verify-webhooks) |
 | Keep identification working behind content blockers | [First-party proxy](#first-party-proxy) |
+| See AI crawlers that never run your page's JavaScript | [Agent sightings](#agent-sightings) |
 | Mount the proxy in FastAPI, Django or Flask | [Framework guides](#framework-guides) |
 | Tune deadlines, pools and the API version | [Timeouts](#timeouts), [Connections](#connections), [API version](#api-version) |
 
@@ -113,6 +114,7 @@ Full documentation: [docs.fingerly.io/docs/sdks/python](https://docs.fingerly.io
 - [Read and write Apple DeviceCheck bits](#read-and-write-apple-devicecheck-bits)
 - [Verify webhooks](#verify-webhooks)
 - [First-party proxy](#first-party-proxy)
+- [Agent sightings](#agent-sightings)
 - [Framework guides](#framework-guides)
 - [Timeouts](#timeouts)
 - [Connections](#connections)
@@ -164,6 +166,16 @@ if event.suspect_level == SuspectLevel.HIGH or Signal.FINGERPRINT_SUPPRESSED in 
 ```
 - `suspect_score` is `None` when the request was not scored, and must not be treated as zero.
 - `project_id` is the UUID string of the Fingerly project the event belongs to, on both `events.get` and the rows of `events.list`; it is `None` when an older server does not send it.
+- `visitor_kind` says what sort of client made the request; compare it with `VisitorKind`. When it is `VisitorKind.AI_BOT`, `event.ai` is an `AIAgent`: `name` and `provider` (plain strings, such as `ChatGPT-User` and `OpenAI`), `purpose` (`AIPurpose`), `runtime` (`AIRuntime`), `declared`, and `verification` with `method` (`AIVerificationMethod`) and `result` (`AIVerificationResult`). On every other event `ai` is `None`. The agent is named by a Web Bot Auth signature when the request carried one, otherwise by its user agent. `verification` says how far that was checked: `AIVerificationMethod.SIGNATURE` (the operator's published key signed the request) or `AIVerificationMethod.IP_LIST` (the address is inside the operator's published ranges), with result `AIVerificationResult.PASS`, `AIVerificationResult.FAIL` (the name was borrowed), or `AIVerificationResult.NOT_ATTEMPTED` with method `AIVerificationMethod.NONE` (the operator publishes nothing to check against, or it could not be checked; the name is then only the client's claim). Only clients that run the browser SDK produce events, so a crawler that does not run JavaScript never appears. `events.list` narrows by `kind`, `ai_provider` (exact and case sensitive, as events name it) and `ai_purpose`, next to `visitor` and `level`:
+
+```python
+from fingerly import AIPurpose, VisitorKind
+
+page = fingerly.events.list(kind=VisitorKind.AI_BOT, ai_purpose=AIPurpose.USER_FETCH)
+for event in page.rows:
+    if event.ai is not None:
+        print(event.ai.provider, event.ai.name)
+```
 - `Event` declares every documented field as an attribute and falls back to the decoded body for fields added later, so a new server field needs no SDK upgrade.
 
 ### Errors
@@ -191,12 +203,13 @@ Consumption comes last, only when every other check passed, so one event backs o
 from fingerly import SuspectLevel, VerifyReason
 
 result = fingerly.events.verify(request_id, tag="checkout")
+event = result.event
 if result.reason == VerifyReason.ALREADY_CONSUMED:
     refuse_replay()
-elif not result.ok:
+elif not result.ok or event is None:
     refuse(result.reason)
-elif result.event.suspect_level == SuspectLevel.HIGH:
-    send_to_review(result.event)
+elif event.suspect_level == SuspectLevel.HIGH:
+    send_to_review(event)
 else:
     allow()
 ```
@@ -207,18 +220,17 @@ Do not authorize an action using scores or visitor identifiers supplied by the b
 
 ## Read and write Apple DeviceCheck bits
 
-For an iOS identification whose App Attest evidence carried a DeviceCheck token, Fingerly holds the token for one hour, and a secret key of the same project and environment can spend it once: to read the device's two bits from Apple, or to set them. The bits mean what you decide; Fingerly never stores or reads them.
+For an iOS identification whose App Attest evidence carried DeviceCheck tokens, Fingerly holds two tokens for one hour, a read token and a write token, and a secret key of the same project and environment can spend each once: the read token to read the device's two bits from Apple, the write token to set them. The bits mean what you decide; Fingerly never stores or reads them.
 
-Apple treats a DeviceCheck token as single-use, so a read and a write each need their own identification. A once-per-device free trial takes two:
+Apple treats a DeviceCheck token as single-use, so one identification supports one read and one write. A once-per-device free trial does both on the identification that asks for the trial:
 
-1. Query on the identification that asks for the trial. If the bit says the device already had one, refuse it.
+1. Query the bits. If the bit says the device already had one, refuse it.
 2. Otherwise grant the trial and record the grant in your own data.
-3. Write the bit on the next identification from that install. Until the write lands, your own record of the grant is what stops a second trial.
+3. Write the bit with the same request ID. Until the write lands, your own record of the grant is what stops a second trial.
 
 ```python
 from fingerly import FingerlyDeviceCheckError
 
-# The identification that asks for the trial.
 try:
     bits = fingerly.device_check.query(request_id)
     used_on_device = bits.found and bits.bit0
@@ -227,8 +239,9 @@ except FingerlyDeviceCheckError as error:
         raise
     used_on_device = False  # no answer, not a verdict
 
-# The next identification, after you recorded the grant.
-fingerly.device_check.write(next_request_id, bit0=True)
+if not used_on_device:
+    # Grant the trial in your own data, then mark the device.
+    fingerly.device_check.write(request_id, bit0=True)
 ```
 
 `AsyncFingerly` has the same calls as coroutines. `write` sends only the bits you name; naming neither raises `TypeError` before anything is sent.
@@ -242,7 +255,7 @@ Every non-2xx answer raises `FingerlyDeviceCheckError` (a `FingerlyAPIError`); b
 | `422` | `bits_required` or `apple_rejected` (with Apple's HTTP status in `apple_status`) |
 | `503` | `device_check_unavailable` |
 
-A `503` or a transport failure leaves the token held, and the SDK retries the identical request, at most twice. A held token kept for a retry accepts only the request it was first used for: a retry with the other operation or other bits answers `409 device_check_spent`. No other answer is retried.
+A `503` or a transport failure leaves the token held, and the SDK retries the identical request, at most twice. A held token kept for a retry accepts only the request it was first used for: a second read, or a write with other bits, on that event answers `409 device_check_spent`. No other answer is retried.
 
 ## Verify webhooks
 
@@ -315,7 +328,7 @@ Responses are marked `no-store`. A redirect is never followed, whatever transpor
 
 Incoming headers follow the sanitize-and-restore sequence: all incoming `x-fingerly-*`, `cookie` and `authorization` headers are stripped, restoring `x-fingerly-sdk-platform` only when it matches an exact lowercase native or bridge platform (`ios`, `android`, `react-native`, `react-native-ios`, `react-native-android`, `flutter`, `flutter-ios`, `flutter-android`, `lynx-ios`, `lynx-android`, `capacitor`, `kotlin-multiplatform`). Requests carrying neither `Origin` nor a validated `x-fingerly-sdk-platform` are rejected locally with `400` (`missing_origin`), and `x-fingerly-origin` is never synthesized from `Host`, `Referer` or the request URL. Exactly one channel goes upstream: a request with an `Origin` is forwarded as a browser call with `x-fingerly-origin` and without the platform header, as the API treats the same request sent to it directly.
 
-Alongside verified proxy metadata (`x-fingerly-host` included), only `content-type`, `x-api-key`, `user-agent`, `idempotency-key`, `sec-fetch-*` and `sec-ch-ua-*` are forwarded. Customer cookies and authorization headers are never passed on. The proxy reports itself upstream as `python/0.4.1` in `x-fingerly-proxy-version`, which the dashboard shows per proxy, and sends `fingerly-python/0.4.1` as its user agent.
+Alongside verified proxy metadata (`x-fingerly-host` included), only `content-type`, `x-api-key`, `user-agent`, `idempotency-key`, `sec-fetch-*`, `sec-ch-ua-*` and the Web Bot Auth `signature`, `signature-input` and `signature-agent` (each dropped when over 4096 bytes) are forwarded. Customer cookies and authorization headers are never passed on. The proxy reports itself upstream as `python/0.5.0` in `x-fingerly-proxy-version`, which the dashboard shows per proxy, and sends `fingerly-python/0.5.0` as its user agent.
 
 Back to the browser it relays only `content-type`, `x-request-id`, `ratelimit-limit`, `ratelimit-remaining` and `retry-after`, plus its own `cache-control: no-store` and a `content-length` for the decoded body. A content blocker can match a response header by name, so an allowlist is what keeps anything naming Fingerly off the page.
 
@@ -358,6 +371,98 @@ proxy = FingerlyProxy(
 )
 ```
 
+## Agent sightings
+
+AI crawlers and fetchers such as GPTBot or ClaudeBot usually fetch a page without running its JavaScript, so the browser SDK never sees them. `AgentSightings` reports the requests your server served to Fingerly, which decides what sent each one, and remembers the answers so your code can ask about a later request without waiting on the network. The console shows the counts with the agents your pages identified.
+
+The SDK forwards raw input only. It never classifies a user agent, never checks an address against a list and never filters requests by what the visitor claims to be.
+
+### Mount it
+
+Wrap your application once per process. It needs a secret key client and the same kind of `client_ip` callback as the [proxy](#resolving-the-client-ip): one trusted address per request, never the left-most `X-Forwarded-For` value.
+
+```python
+import os
+
+from fingerly import AgentSightings, Fingerly
+
+fingerly = Fingerly(secret_key=os.environ["FINGERLY_SECRET_KEY"])
+sightings = AgentSightings(
+    fingerly,
+    client_ip=lambda request: (
+        request.headers.get("cf-connecting-ip") or request.peer_host
+    ),
+)
+
+# Flask, Django's sync stack, any WSGI app:
+app.wsgi_app = sightings.wsgi(app.wsgi_app)
+```
+
+For asyncio applications, use `AsyncAgentSightings` with an `AsyncFingerly` client and wrap the ASGI app:
+
+```python
+from fingerly import AsyncAgentSightings, AsyncFingerly
+
+fingerly = AsyncFingerly(secret_key=os.environ["FINGERLY_SECRET_KEY"])
+sightings = AsyncAgentSightings(fingerly, client_ip=client_ip)
+app = sightings.asgi(app)  # FastAPI, Starlette, Django ASGI
+```
+
+`AgentSightings.asgi` works too, with its flusher on a thread instead of a task. Where neither middleware fits, call `sightings.report(request, content_type)` after each response.
+
+### Which responses are reported
+
+By default, every response with a `Content-Type` of `text/html` or `application/xhtml+xml`, and every request for `/robots.txt`, `/llms.txt` or `/llms-full.txt`, whatever the status. Static files, API routes and health checks are left out. Widen or narrow that by your own resources, never by visitor:
+
+```python
+sightings = AgentSightings(
+    fingerly,
+    client_ip=client_ip,
+    include_paths=["/feeds/"],  # reported whatever their content type
+    exclude_paths=["/admin"],  # never reported; wins over everything
+    content_types=["text/html", "application/rss+xml"],  # replaces the default
+)
+```
+
+Paths are matched as the mounted application sees them, as for the proxy.
+
+### Ask about a request
+
+`lookup` answers from memory: never a network call, never an exception. It takes a `ProxyRequest`, an ASGI scope, a WSGI environ, or a Starlette, FastAPI, Django or Flask request. Until the server has answered for an earlier request with the same user agent, address and `Signature-Agent`, it returns `AGENT_UNKNOWN`. Serve that as usual.
+
+```python
+from fingerly import AGENT_UNKNOWN, AIVerificationResult, VisitorKind
+
+answer = sightings.lookup(request)
+if answer is AGENT_UNKNOWN:
+    pass  # not answered yet: serve as usual
+elif answer.visitor_kind == VisitorKind.AI_BOT and answer.ai is not None:
+    if answer.ai.verification.result == AIVerificationResult.FAIL:
+        ...  # it claims to be an agent its operator does not vouch for
+```
+
+Each answer holds `ttl`, `visitor_kind`, `agent` and, for an AI agent, `ai` with the same fields as on events. A signed request (Web Bot Auth) is checked by the server every time, so `lookup` never remembers it. A request the server could not use is answered `VisitorKind.UNKNOWN` with `ttl` 0, so `lookup` never remembers it either and keeps answering `AGENT_UNKNOWN`; the other requests of the report are answered as usual.
+
+### What is sent
+
+For each reported request: the `User-Agent` header, the address from `client_ip`, the `Host`, the method, the Web Bot Auth `Signature`, `Signature-Input` and `Signature-Agent` headers when present, and how many times that same request was seen. A request whose user agent or method is over 4096 bytes is not reported, a `Host` or signature header over 4096 bytes is left out, and a request whose address cannot be resolved is not reported.
+
+Never sent, and never logged: the path, the query string, cookies, `Authorization`, any other header, the body or the response.
+
+### Memory and failures
+
+Answers live in a per-process LRU of 4096 entries by default (`cache_size`, at most 65536), a few hundred bytes each: about 1.5 MB at the default. Reports wait in a buffer of at most 1000 items, where repeats of the same request become one item with a count. It is sent in batches of up to 200 items, when it reaches 200 items or 64 KiB or 2 seconds after its oldest item, with one report in flight and a 5 second deadline. When the buffer is full, new requests are not reported and `sightings.dropped` counts them.
+
+Every failure fails open: requests keep being served and `lookup` keeps answering from memory or with `AGENT_UNKNOWN`. A `429` pauses reporting for its `Retry-After`, held to between 1 second and 24 hours, while the buffer keeps counting, a `503` or an unreachable API is retried with backoff from 1 to 60 seconds, a rejected key pauses reporting for 60 seconds, and a `422` (no request in the report was usable) drops the report. Problems are logged on the `fingerly.agents` logger, at most once a minute each.
+
+### Processes, threads and serverless
+
+`AgentSightings` sends from a daemon thread, which never keeps the process alive. A forked worker (gunicorn, uWSGI, also with `--preload` or without lazy apps) starts with an empty buffer, its own thread and its own connections; answers already remembered are kept. `AsyncAgentSightings` sends from a task on the loop that serves your requests.
+
+What is pending is sent on a graceful shutdown without any code of yours, within 5 seconds: the ASGI middleware sends it when the server's lifespan shutdown arrives (uvicorn, gunicorn's uvicorn worker, Django's ASGI handler included), and `AgentSightings` sends it when the interpreter exits, as a gunicorn or uWSGI worker does after `SIGTERM`. Call `close()` (or `await aclose()`) yourself where your app has a shutdown hook of its own. Where the process is frozen between invocations, build it with `background=False` and call `flush()` (or `await flush()`) before each invocation ends.
+
+The call underneath is `fingerly.agents.sightings([...])`, taking `AgentSighting` items and returning `AgentSightingsResult`. A refusal raises `FingerlyAPIError` with `retry_after` and, on a `429`, `rate_limit_scope` (`daily` for the daily allowance).
+
 ## Framework guides
 
 Each guide is a complete app. Replace `/k7x2qm4a` with the path the dashboard issued, and set `FINGERLY_SECRET_KEY` and `FINGERLY_PROXY_KEY`. The browser posts identifications to the proxy path and sends the `requestId` it gets back to `/verify/<request_id>`, where your server reads the event with its secret key.
@@ -383,6 +488,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fingerly import (
     AsyncFingerly,
     FingerlyAPIError,
+    FingerlyError,
     FingerlyEventPendingError,
     FingerlyProxy,
 )
@@ -419,6 +525,9 @@ async def verify(request_id: str, request: Request):
         raise HTTPException(503, headers={"Retry-After": retry_after}) from None
     except FingerlyAPIError as error:
         raise HTTPException(404 if error.status == 404 else 502) from None
+    except FingerlyError:
+        # A timeout or an unreachable API: answer it, never a 500.
+        raise HTTPException(503, headers={"Retry-After": "2"}) from None
     return {
         "identifiable": event.identifiable,
         "visitor_id": event.visitor_id,
@@ -500,7 +609,7 @@ async def application(scope, receive, send):
 # mysite/views.py
 from django.http import JsonResponse
 
-from fingerly import FingerlyAPIError, FingerlyEventPendingError
+from fingerly import FingerlyAPIError, FingerlyError, FingerlyEventPendingError
 from mysite.identification import fingerly
 
 
@@ -516,6 +625,11 @@ def verify(request, request_id):
     except FingerlyAPIError as error:
         status = 404 if error.status == 404 else 502
         return JsonResponse({"error": error.code}, status=status)
+    except FingerlyError:
+        # A timeout or an unreachable API: answer it, never a 500.
+        return JsonResponse(
+            {"error": "unavailable"}, status=503, headers={"Retry-After": "2"}
+        )
     return JsonResponse(
         {
             "identifiable": event.identifiable,
@@ -553,6 +667,7 @@ from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from fingerly import (
     Fingerly,
     FingerlyAPIError,
+    FingerlyError,
     FingerlyEventPendingError,
     FingerlyProxy,
 )
@@ -579,6 +694,9 @@ def verify(request_id):
         return {"error": error.code}, 503, {"Retry-After": retry_after}
     except FingerlyAPIError as error:
         abort(404 if error.status == 404 else 502)
+    except FingerlyError:
+        # A timeout or an unreachable API: answer it, never a 500.
+        return {"error": "unavailable"}, 503, {"Retry-After": "2"}
     return {
         "identifiable": event.identifiable,
         "visitor_id": event.visitor_id,

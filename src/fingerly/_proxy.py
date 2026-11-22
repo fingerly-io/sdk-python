@@ -108,6 +108,12 @@ CLIENT_METADATA_HEADERS = (
     "sec-ch-ua-platform",
 )
 
+#: Web Bot Auth headers an AI agent's browser signs the request with,
+#: forwarded when present and at most 4096 bytes. The API ignores a longer
+#: one, so it is dropped here rather than refused.
+SIGNATURE_HEADERS = ("signature", "signature-input", "signature-agent")
+MAX_SIGNATURE_HEADER_BYTES = 4096
+
 CORS_ALLOW_HEADERS = "content-type, x-api-key, idempotency-key, x-fingerly-sdk-platform"
 CORS_EXPOSE_HEADERS = "x-request-id, ratelimit-limit, ratelimit-remaining, retry-after"
 MISSING_ORIGIN_BODY = (
@@ -124,10 +130,17 @@ class Headers(Mapping[str, str]):
 
     def __init__(self, items: Iterable[tuple[str, str]]) -> None:
         merged: dict[str, str] = {}
+        first: dict[str, str] = {}
         for name, value in items:
             key = name.lower()
             merged[key] = f"{merged[key]}, {value}" if key in merged else value
+            first.setdefault(key, value)
         self._items = merged
+        self._first = first
+
+    def first(self, key: str, default: str = "") -> str:
+        """The first value of a header that may be repeated, or ``default``."""
+        return self._first.get(key.lower(), default)
 
     def __getitem__(self, key: str) -> str:
         return self._items[key.lower()]
@@ -236,14 +249,16 @@ class FingerlyProxy:
         >>> proxy = FingerlyProxy(
         ...     proxy_key=os.environ["FINGERLY_PROXY_KEY"],
         ...     path="/k7x2qm4a",
-        ...     client_ip=lambda request: request.headers["cf-connecting-ip"],
+        ...     client_ip=lambda request: (
+        ...         request.headers.get("cf-connecting-ip") or request.peer_host
+        ...     ),
         ... )
         >>> app.add_route("/k7x2qm4a", proxy.asgi)
     """
 
     def __init__(
         self,
-        client_ip: Callable[[ProxyRequest], str],
+        client_ip: Callable[[ProxyRequest], Optional[str]],
         proxy_key: Optional[str] = None,
         path: Optional[str] = None,
         api_version: str = "v1",
@@ -262,7 +277,9 @@ class FingerlyProxy:
             client_ip: Resolves the visitor's address from infrastructure your
                 app trusts. Never read the left-most ``X-Forwarded-For`` value:
                 the visitor writes it. Called under both standards, so it must
-                be synchronous.
+                be synchronous. Return None when there is no address, such
+                as ``request.peer_host`` on a server that reports no peer;
+                that request is answered 500 and not forwarded.
             proxy_key: Required. A proxy key, ``fly_px_<environment>_…``, held
                 only on your server. Browsers must present a public key,
                 ``fly_pk_…``, for the same environment.
@@ -513,6 +530,11 @@ class FingerlyProxy:
         for name in CLIENT_METADATA_HEADERS:
             value = request.headers.get(name)
             if value:
+                headers[name] = value
+        for name in SIGNATURE_HEADERS:
+            value = request.headers.get(name)
+            # Decoded as Latin-1 by both standards: one character per byte.
+            if value and len(value) <= MAX_SIGNATURE_HEADER_BYTES:
                 headers[name] = value
         return headers
 

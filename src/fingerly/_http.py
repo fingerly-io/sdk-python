@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import math
+import os
 import ssl
 import threading
 import time
@@ -33,6 +34,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Callable, Generic, Optional, TypeVar, Union
 
 import httpx
+
+# Serialises forgetting a parent's connections in a forked child.
+_fork_guard = threading.Lock()
 
 #: The largest response body read from the API, after decoding.
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -60,6 +64,50 @@ _DEADLINE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
 #: The shortest wait handed to a socket once the deadline has passed, so the
 #: operation fails as a timeout through httpx's own exception mapping.
 _EXPIRED = 0.001
+
+
+class RequestProgress:
+    """Whether a request was written in full, for a caller that must know.
+
+    Set it as :data:`REQUEST_PROGRESS` around a call; the pool marks it from
+    the transport's trace. A replacement transport that reports no trace
+    leaves it unmarked and ``traced`` False, so the caller cannot tell.
+    """
+
+    __slots__ = ("traced", "written")
+
+    def __init__(self) -> None:
+        self.traced = False
+        self.written = False
+
+    def mark(self, event: str) -> None:
+        self.traced = True
+        if event.endswith(".send_request_body.complete"):
+            self.written = True
+
+    @property
+    def unsent(self) -> bool:
+        """True when the transport reported progress and the body never left."""
+        return self.traced and not self.written
+
+
+REQUEST_PROGRESS: contextvars.ContextVar[Optional[RequestProgress]] = (
+    contextvars.ContextVar("fingerly_request_progress", default=None)
+)
+
+
+def _sync_trace(progress: RequestProgress) -> Callable[[str, Any], None]:
+    def trace(event: str, info: Any) -> None:
+        progress.mark(event)
+
+    return trace
+
+
+def _async_trace(progress: RequestProgress) -> Callable[[str, Any], Any]:
+    async def trace(event: str, info: Any) -> None:
+        progress.mark(event)
+
+    return trace
 
 
 class ResponseTooLargeError(Exception):
@@ -260,6 +308,14 @@ class _Shards(Generic[C]):
         self.closed = True
         return shards
 
+    def forget(self) -> None:
+        """Drops every pool unclosed, in a forked child.
+
+        Closing them would shut connections the parent still uses; the
+        child's copies of the sockets are released when collected.
+        """
+        self._active = []
+
     @property
     def connections(self) -> int:
         """Connections currently open across the pools, for diagnostics."""
@@ -290,6 +346,7 @@ class SyncPool:
             make, limits or DEFAULT_LIMITS, fixed=transport is not None
         )
         self._lock = threading.Lock()
+        self._pid = os.getpid()
 
     def request(
         self,
@@ -299,8 +356,11 @@ class SyncPool:
         headers: Optional[Headers] = None,
         content: Optional[bytes] = None,
         params: Optional[Mapping[str, str]] = None,
+        deadline: Optional[float] = None,
     ) -> Reply:
         """Sends one request and reads its body, all within the deadline.
+
+        ``deadline`` replaces the pool's own, in seconds, for this request.
 
         Raises:
             httpx.TimeoutException: When the deadline passes.
@@ -308,17 +368,24 @@ class SyncPool:
             ResponseTooLargeError: When the body exceeds the cap.
             RuntimeError: When the pool has been closed.
         """
+        self._check_fork()
         with self._lock:
             if self._shards.closed:
                 raise RuntimeError("The Fingerly client has been closed")
             shard, idle = self._shards.acquire()
         for stale in idle:
             stale.client.close()
-        deadline = time.monotonic() + self._deadline
-        token = _DEADLINE.set(deadline)
+        ends = time.monotonic() + (self._deadline if deadline is None else deadline)
+        token = _DEADLINE.set(ends)
+        progress = REQUEST_PROGRESS.get()
         try:
             with shard.client.stream(
-                method, url, headers=headers, content=content, params=params
+                method,
+                url,
+                headers=headers,
+                content=content,
+                params=params,
+                extensions={"trace": _sync_trace(progress)} if progress else None,
             ) as response:
                 _refuse_declared_oversize(response)
                 chunks: list[bytes] = []
@@ -328,7 +395,7 @@ class SyncPool:
                     if size > MAX_RESPONSE_BYTES:
                         raise ResponseTooLargeError(response.status_code)
                     chunks.append(chunk)
-                    if time.monotonic() > deadline:
+                    if time.monotonic() > ends:
                         raise httpx.ReadTimeout("deadline exceeded")
                 return Reply(response.status_code, response.headers, b"".join(chunks))
         finally:
@@ -340,10 +407,31 @@ class SyncPool:
 
     def close(self) -> None:
         """Closes every connection. Safe to call more than once."""
+        self._check_fork()
         with self._lock:
             shards = self._shards.drain()
         for shard in shards:
             shard.client.close()
+
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`close` has run."""
+        return self._shards.closed
+
+    def _check_fork(self) -> None:
+        """Forgets the parent's connections and lock in a forked child.
+
+        A forked worker must never write to a connection its parent or a
+        sibling also holds, and the parent may have held the lock at the
+        fork. Checked per request, since uWSGI and other servers fork from C
+        without running Python's fork hooks.
+        """
+        if self._pid != os.getpid():
+            with _fork_guard:
+                if self._pid != os.getpid():
+                    self._lock = threading.Lock()
+                    self._shards.forget()
+                    self._pid = os.getpid()
 
     @property
     def connections(self) -> int:
@@ -374,6 +462,7 @@ class AsyncPool:
         self._shards: _Shards[httpx.AsyncClient] = _Shards(
             make, limits or DEFAULT_LIMITS, fixed=transport is not None
         )
+        self._pid = os.getpid()
 
     async def request(
         self,
@@ -383,8 +472,11 @@ class AsyncPool:
         headers: Optional[Headers] = None,
         content: Optional[bytes] = None,
         params: Optional[Mapping[str, str]] = None,
+        deadline: Optional[float] = None,
     ) -> Reply:
         """Sends one request and reads its body, all within the deadline.
+
+        ``deadline`` replaces the pool's own, in seconds, for this request.
 
         Raises:
             httpx.TimeoutException: When the deadline passes.
@@ -394,13 +486,18 @@ class AsyncPool:
         """
         if self._shards.closed:
             raise RuntimeError("The Fingerly client has been closed")
+        self._check_fork()
         shard, idle = self._shards.acquire()
+        progress = REQUEST_PROGRESS.get()
+        extensions = {"trace": _async_trace(progress)} if progress else None
         try:
             for stale in idle:
                 await stale.client.aclose()
             return await asyncio.wait_for(
-                _read_async(shard.client, method, url, headers, content, params),
-                self._deadline,
+                _read_async(
+                    shard.client, method, url, headers, content, params, extensions
+                ),
+                self._deadline if deadline is None else deadline,
             )
         except asyncio.TimeoutError:
             raise httpx.ReadTimeout("deadline exceeded") from None
@@ -412,6 +509,19 @@ class AsyncPool:
         """Closes every connection. Safe to call more than once."""
         for shard in self._shards.drain():
             await shard.client.aclose()
+
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`aclose` has run."""
+        return self._shards.closed
+
+    def _check_fork(self) -> None:
+        """Forgets the parent's connections in a forked child."""
+        if self._pid != os.getpid():
+            with _fork_guard:
+                if self._pid != os.getpid():
+                    self._shards.forget()
+                    self._pid = os.getpid()
 
     @property
     def connections(self) -> int:
@@ -426,9 +536,15 @@ async def _read_async(
     headers: Optional[Headers],
     content: Optional[bytes],
     params: Optional[Mapping[str, str]],
+    extensions: Optional[dict[str, Any]] = None,
 ) -> Reply:
     async with client.stream(
-        method, url, headers=headers, content=content, params=params
+        method,
+        url,
+        headers=headers,
+        content=content,
+        params=params,
+        extensions=extensions,
     ) as response:
         _refuse_declared_oversize(response)
         chunks: list[bytes] = []

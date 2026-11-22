@@ -21,6 +21,10 @@ from conftest import Recorder, event_body, json_response
 import fingerly
 from fingerly import (
     SIGNAL_NAMES,
+    AIPurpose,
+    AIRuntime,
+    AIVerificationMethod,
+    AIVerificationResult,
     AttestationState,
     AttestationStatus,
     AttestSkippedReason,
@@ -31,6 +35,7 @@ from fingerly import (
     Signal,
     SuspectLevel,
     VerifyReason,
+    VisitorKind,
     WebhookEventType,
 )
 from fingerly._models import parse_document, parse_event
@@ -38,6 +43,7 @@ from fingerly._models import parse_document, parse_event
 # server/domain/risk/signals.go (Signal) and groups.go (Group).
 SERVER_SIGNALS = {
     "active_call",
+    "ai_spoofed",
     "android_emulator",
     "antidetect_browser",
     "anycast_ip",
@@ -67,6 +73,7 @@ SERVER_SIGNALS = {
     "frida_detected",
     "geo_mismatch",
     "high_activity",
+    "identity_obfuscated",
     "incognito",
     "incognito_mode",
     "ios_simulator",
@@ -107,7 +114,6 @@ SERVER_SIGNALS = {
     "vpn_os_mismatch",
     "vpn_public",
     "vpn_relay",
-    "vpn_timezone",
     "web_ticket_invalid",
     "web_ticket_missing",
 }
@@ -122,6 +128,15 @@ PINNED: dict[type[Enum], set[str]] = {
     EventState: {"pending", "enriched", "unavailable"},
     # server/models/enums.go (Environment).
     Environment: {"production", "staging", "development"},
+    # server/domain/agent/agent.go (Kind) and server/schemas/agents.go
+    # (SightingUnreadable, only in an agent sightings answer).
+    VisitorKind: {"human", "ai_bot", "automation", "search_crawler", "unknown"},
+    # server/models/ai.go (AIPurpose, AIRuntime, AIVerificationMethod and
+    # AIVerificationResult).
+    AIPurpose: {"training", "search", "user_fetch", "agent"},
+    AIRuntime: {"provider_cloud", "hosted_browser", "user_device"},
+    AIVerificationMethod: {"signature", "ip_list", "reverse_dns", "none"},
+    AIVerificationResult: {"pass", "fail", "not_attempted"},
     # server/services/android_trust.go (AttestationAttested and siblings).
     AttestationState: {"attested", "not_attested", "failed"},
     # server/services/android_trust.go (AttestationReport.Status).
@@ -255,6 +270,21 @@ class TestServerSources:
             member.value for member in WebhookEventType
         }
 
+    def test_visitor_kinds(self) -> None:
+        kinds = _go_constants("domain/agent/agent.go", "Kind")
+        unreadable = _go_constants("schemas/agents.go", "SightingUnreadable")
+        assert kinds | unreadable == {member.value for member in VisitorKind}
+
+    @pytest.mark.parametrize(
+        "enum",
+        [AIPurpose, AIRuntime, AIVerificationMethod, AIVerificationResult],
+        ids=lambda enum: enum.__name__,
+    )
+    def test_ai_agent_values(self, enum: type[Enum]) -> None:
+        assert _go_constants("models/ai.go", enum.__name__) == {
+            member.value for member in enum
+        }
+
     def test_attestation(self) -> None:
         trust = "services/android_trust.go"
         states = _go_block(trust, r"(\n\tAttestationAttested\s.*?)\n\)")
@@ -349,3 +379,18 @@ class TestStringBehaviour:
         ) as client:
             client.events.list(level=SuspectLevel.HIGH)
         assert dict(recorder.requests[0].url.params)["level"] == "high"
+
+    def test_kind_and_ai_filters_are_sent_as_their_values(self) -> None:
+        recorder = Recorder(json_response({"rows": [], "page": 1, "page_size": 10}))
+        with Fingerly(
+            secret_key="fly_sk_development_enums", transport=recorder.transport()
+        ) as client:
+            client.events.list(
+                kind=VisitorKind.AI_BOT,
+                ai_provider="OpenAI",
+                ai_purpose=AIPurpose.USER_FETCH,
+            )
+        params = dict(recorder.requests[0].url.params)
+        assert params["kind"] == "ai_bot"
+        assert params["ai_provider"] == "OpenAI"
+        assert params["ai_purpose"] == "user_fetch"

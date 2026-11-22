@@ -7,14 +7,42 @@ new server field does not require an SDK upgrade.
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 from ._enums import Signal, VerifyReason
 from ._errors import FingerlyError
+
+_Parsed = TypeVar("_Parsed")
+
+
+def _decoding(
+    parse: Callable[[Mapping[str, Any]], _Parsed],
+) -> Callable[[Mapping[str, Any]], _Parsed]:
+    """Makes a parser raise only :class:`FingerlyError` on an unusable body.
+
+    The parsers check every field they read, so this is the backstop: a body
+    shaped in a way nobody foresaw must still surface as the SDK's own error,
+    never as a ``TypeError`` or ``AttributeError`` in the caller's handler.
+    """
+
+    @functools.wraps(parse)
+    def parsing(payload: Mapping[str, Any]) -> _Parsed:
+        if not isinstance(payload, Mapping):
+            raise FingerlyError("The Fingerly API response is unreadable")
+        try:
+            return parse(payload)
+        except FingerlyError:
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError, IndexError) as error:
+            raise FingerlyError("The Fingerly API response is unreadable") from error
+
+    return parsing
+
 
 _INSTANT = re.compile(
     r"\A(?P<date>\d{4}-\d{2}-\d{2})[Tt ](?P<clock>\d{2}:\d{2}:\d{2})"
@@ -107,6 +135,58 @@ class EventDocument:
 
 
 @dataclass(frozen=True)
+class AIVerification:
+    """How an AI agent's claimed identity was checked, and what that found.
+
+    Attributes:
+        method: ``signature``, ``ip_list``, ``reverse_dns`` or ``none``, an
+            :class:`AIVerificationMethod` value.
+        result: ``pass``, ``fail`` or ``not_attempted``, an
+            :class:`AIVerificationResult` value.
+    """
+
+    method: str
+    result: str
+
+
+@dataclass(frozen=True)
+class AIAgent:
+    """The AI agent behind an ``ai_bot`` event.
+
+    The agent is named by a Web Bot Auth signature when the request carried
+    one, otherwise by its user agent. ``verification`` says how far that was
+    checked: ``AIVerificationMethod.SIGNATURE`` (the operator's published key
+    signed the request) or ``AIVerificationMethod.IP_LIST`` (the address is
+    inside the operator's published ranges), with result
+    ``AIVerificationResult.PASS``, ``AIVerificationResult.FAIL`` (the name was
+    borrowed), or ``AIVerificationResult.NOT_ATTEMPTED`` with method
+    ``AIVerificationMethod.NONE`` (the operator publishes nothing to check
+    against, or it could not be checked; the name is then only the client's
+    claim).
+
+    Closed sets stay typed ``str`` like the other server fields, so a value a
+    newer server adds still parses.
+
+    Attributes:
+        name: The agent as its operator names it, such as ``ChatGPT-User``.
+        provider: The company that operates it, such as ``OpenAI``. An open
+            string, not an enum.
+        purpose: What its traffic is for, an :class:`AIPurpose` value.
+        runtime: Where it runs, an :class:`AIRuntime` value.
+        declared: True when the agent named itself, in its user agent or a
+            signature.
+        verification: How its claim was checked, and what that found.
+    """
+
+    name: str
+    provider: str
+    purpose: str
+    runtime: str
+    declared: bool
+    verification: AIVerification
+
+
+@dataclass(frozen=True)
 class Event:
     """A stored identification event.
 
@@ -122,11 +202,14 @@ class Event:
     Closed string sets stay typed ``str`` and hold the value as sent, so a
     value a newer server adds still parses. Compare them with the enum
     members: ``state`` with :class:`EventState`, ``environment`` with
-    :class:`Environment`, ``suspect_level`` with :class:`SuspectLevel`.
+    :class:`Environment`, ``suspect_level`` with :class:`SuspectLevel`,
+    ``visitor_kind`` with :class:`VisitorKind`.
 
     Attributes:
         project_id: The Fingerly project the event belongs to, as a UUID
             string. ``None`` when an older server did not send it.
+        ai: The AI agent, present only when ``visitor_kind`` is
+            ``VisitorKind.AI_BOT``; ``None`` otherwise.
         raw: The decoded response body. Fields this SDK does not declare are
             readable as attributes through it.
     """
@@ -160,6 +243,7 @@ class Event:
     os: Optional[str] = None
     device_kind: Optional[str] = None
     visitor_kind: Optional[str] = None
+    ai: Optional[AIAgent] = None
     document: Optional[Mapping[str, Any]] = None
     raw: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
@@ -278,6 +362,148 @@ class VerifyResult:
     event: Optional[Event] = None
 
 
+@dataclass(frozen=True)
+class AgentSighting:
+    """One request your server served, reported as raw input.
+
+    Sent by :meth:`Agents.sightings`. Nothing is decided about the visitor
+    before it is sent: the server classifies it.
+
+    Attributes:
+        user_agent: The ``User-Agent`` header as received, ``""`` when the
+            request had none. At most 4096 bytes.
+        client_ip: The visitor's address from infrastructure you trust: one
+            IPv4 or IPv6 literal, never a forwarded list.
+        host: The ``Host`` the request was sent to.
+        method: The request method; the server reads ``GET`` when absent.
+        signature: The ``Signature`` header, when the request had one.
+        signature_input: The ``Signature-Input`` header, when it had one.
+        signature_agent: The ``Signature-Agent`` header, when it had one.
+        count: How many times this exact request was served since it was last
+            reported, this one included; the server reads 1 when absent.
+    """
+
+    user_agent: str
+    client_ip: str
+    host: Optional[str] = None
+    method: Optional[str] = None
+    signature: Optional[str] = None
+    signature_input: Optional[str] = None
+    signature_agent: Optional[str] = None
+    count: Optional[int] = None
+
+    def to_wire(self) -> dict[str, Any]:
+        """The JSON object the API reads, without the fields left unset."""
+        wire: dict[str, Any] = {
+            "user_agent": self.user_agent,
+            "client_ip": self.client_ip,
+        }
+        for name in (
+            "host",
+            "method",
+            "signature",
+            "signature_input",
+            "signature_agent",
+            "count",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                wire[name] = value
+        return wire
+
+
+@dataclass(frozen=True)
+class AgentAnswer:
+    """What the server said sent one reported request.
+
+    Compare ``visitor_kind`` with :class:`VisitorKind` members and
+    ``ai.verification.result`` with :class:`AIVerificationResult` members.
+    :data:`AGENT_UNKNOWN` is the answer for a request the server has not
+    answered yet: serve it as usual.
+
+    Attributes:
+        ttl: Seconds the answer may be reused for the same user agent, address
+            and ``Signature-Agent``; 0 for a signed request, checked every time.
+        visitor_kind: ``human``, ``ai_bot``, ``automation`` or
+            ``search_crawler``, kept as sent so a newer value still parses;
+            ``""`` only on :data:`AGENT_UNKNOWN`.
+        agent: The agent's name where the server knows it, such as ``GPTBot``.
+        ai: The AI agent, present only when ``visitor_kind`` is
+            ``VisitorKind.AI_BOT``.
+    """
+
+    ttl: int
+    visitor_kind: str
+    agent: Optional[str] = None
+    ai: Optional[AIAgent] = None
+
+    @property
+    def known(self) -> bool:
+        """False for :data:`AGENT_UNKNOWN`, True for a server answer."""
+        return self is not AGENT_UNKNOWN
+
+
+#: The answer when the server has not answered for a request yet, or it could
+#: not be reported. Treat it as "serve as usual". Compare with ``is``.
+AGENT_UNKNOWN = AgentAnswer(ttl=0, visitor_kind="")
+
+
+@dataclass(frozen=True)
+class AgentSightingsResult:
+    """The server's answer to :meth:`Agents.sightings`.
+
+    Attributes:
+        rules_version: Names the classification rules. When it changes, every
+            remembered answer is stale.
+        items: One answer per reported request, in the order sent;
+            :data:`AGENT_UNKNOWN` where the server's answer could not be read.
+    """
+
+    rules_version: str
+    items: Sequence[AgentAnswer]
+
+
+@_decoding
+def parse_agent_sightings(payload: Mapping[str, Any]) -> AgentSightingsResult:
+    """Builds :class:`AgentSightingsResult` from a sightings answer.
+
+    An item that cannot be read, such as one without an integer ``ttl`` or a
+    string ``visitor_kind``, is :data:`AGENT_UNKNOWN` in its position, so the
+    other answers still line up with the requests they answer.
+
+    Raises:
+        FingerlyError: If ``rules_version`` or ``items`` is missing.
+    """
+    rules_version = _require(payload, "rules_version", str)
+    items = _require(payload, "items", list)
+    return AgentSightingsResult(
+        rules_version=rules_version,
+        items=tuple(_agent_answer(item) for item in items),
+    )
+
+
+def _agent_answer(item: Any) -> AgentAnswer:
+    """One answer of a sightings report, or :data:`AGENT_UNKNOWN` if unreadable."""
+    if not isinstance(item, Mapping):
+        return AGENT_UNKNOWN
+    ttl = item.get("ttl")
+    visitor_kind = item.get("visitor_kind")
+    if (
+        not isinstance(ttl, int)
+        or isinstance(ttl, bool)
+        or not isinstance(visitor_kind, str)
+    ):
+        return AGENT_UNKNOWN
+    agent = item.get("agent")
+    return AgentAnswer(
+        ttl=ttl,
+        visitor_kind=visitor_kind,
+        agent=agent if isinstance(agent, str) and agent else None,
+        ai=_parse_ai(item.get("ai")),
+    )
+
+
+@_decoding
 def parse_consume(payload: Mapping[str, Any]) -> ConsumeResult:
     """Builds :class:`ConsumeResult` from a consume answer."""
     return ConsumeResult(
@@ -290,6 +516,7 @@ def parse_consume(payload: Mapping[str, Any]) -> ConsumeResult:
 _UNKNOWN_INSTANT = datetime.min.replace(tzinfo=timezone.utc)
 
 
+@_decoding
 def parse_verified_event(
     payload: Mapping[str, Any],
 ) -> tuple[Event, Optional[datetime]]:
@@ -342,6 +569,7 @@ def failed_check(
     return VerifyReason.OK
 
 
+@_decoding
 def parse_device_check_bits(payload: Mapping[str, Any]) -> DeviceCheckBits:
     """Builds :class:`DeviceCheckBits` from a query answer."""
     last_update = payload.get("last_update")
@@ -355,6 +583,7 @@ def parse_device_check_bits(payload: Mapping[str, Any]) -> DeviceCheckBits:
     )
 
 
+@_decoding
 def parse_device_check_write(payload: Mapping[str, Any]) -> DeviceCheckWriteResult:
     """Builds :class:`DeviceCheckWriteResult` from a write answer."""
     bit0, bit1 = payload.get("bit0"), payload.get("bit1")
@@ -364,6 +593,7 @@ def parse_device_check_write(payload: Mapping[str, Any]) -> DeviceCheckWriteResu
     )
 
 
+@_decoding
 def parse_event(payload: Mapping[str, Any]) -> Event:
     """Builds an :class:`Event` from a decoded response body.
 
@@ -385,32 +615,34 @@ def parse_event(payload: Mapping[str, Any]) -> Event:
         platform=_require(payload, "platform", str),
         sdk_platform=_require(payload, "sdk_platform", str),
         sdk_version=_require(payload, "sdk_version", str),
-        has_document=bool(payload.get("has_document", False)),
-        triggers=[_parse_trigger(row) for row in payload.get("triggers") or ()],
-        reason=payload.get("reason"),
-        suspect_score=payload.get("suspect_score"),
-        suspect_level=payload.get("suspect_level"),
-        origin=payload.get("origin"),
-        url_host=payload.get("url_host"),
-        url_path=payload.get("url_path"),
-        tag=payload.get("tag"),
-        project_id=payload.get("project_id"),
-        ip_network=payload.get("ip_network") or None,
-        country_code=payload.get("country_code"),
-        country_name=payload.get("country_name"),
-        asn=payload.get("asn"),
-        asn_name=payload.get("asn_name"),
-        anonymity_network=payload.get("anonymity_network"),
-        agent=payload.get("agent"),
-        agent_version=payload.get("agent_version"),
-        os=payload.get("os"),
-        device_kind=payload.get("device_kind"),
-        visitor_kind=payload.get("visitor_kind"),
-        document=payload.get("document"),
+        has_document=_flag(payload, "has_document"),
+        triggers=[_parse_trigger(row) for row in _list(payload, "triggers")],
+        reason=_optional(payload, "reason", str),
+        suspect_score=_optional(payload, "suspect_score", int),
+        suspect_level=_optional(payload, "suspect_level", str),
+        origin=_optional(payload, "origin", str),
+        url_host=_optional(payload, "url_host", str),
+        url_path=_optional(payload, "url_path", str),
+        tag=_optional(payload, "tag", str),
+        project_id=_optional(payload, "project_id", str),
+        ip_network=_optional(payload, "ip_network", str) or None,
+        country_code=_optional(payload, "country_code", str),
+        country_name=_optional(payload, "country_name", str),
+        asn=_optional(payload, "asn", str),
+        asn_name=_optional(payload, "asn_name", str),
+        anonymity_network=_optional(payload, "anonymity_network", str),
+        agent=_optional(payload, "agent", str),
+        agent_version=_optional(payload, "agent_version", str),
+        os=_optional(payload, "os", str),
+        device_kind=_optional(payload, "device_kind", str),
+        visitor_kind=_optional(payload, "visitor_kind", str),
+        ai=_parse_ai(payload.get("ai")),
+        document=_optional(payload, "document", Mapping),
         raw=payload,
     )
 
 
+@_decoding
 def parse_page(payload: Mapping[str, Any]) -> EventPage:
     """Builds an :class:`EventPage` from a decoded response body.
 
@@ -418,9 +650,9 @@ def parse_page(payload: Mapping[str, Any]) -> EventPage:
         FingerlyError: If the page or any of its rows is unusable.
     """
     return EventPage(
-        rows=[parse_event(row) for row in payload.get("rows") or ()],
-        page=int(payload.get("page", 0)),
-        page_size=int(payload.get("page_size", 0)),
+        rows=[parse_event(row) for row in _list(payload, "rows")],
+        page=_integer(payload, "page", 0),
+        page_size=_integer(payload, "page_size", 0),
     )
 
 
@@ -443,11 +675,16 @@ def parse_instant(value: str) -> datetime:
         if match.group("sign") is None
         else f"{match.group('sign')}{match.group('hours')}:{match.group('minutes')}"
     )
-    return datetime.fromisoformat(
-        f"{match.group('date')}T{match.group('clock')}.{micros}{offset}"
-    )
+    try:
+        return datetime.fromisoformat(
+            f"{match.group('date')}T{match.group('clock')}.{micros}{offset}"
+        )
+    except ValueError:
+        # Shaped right, but no such instant, such as month 13.
+        raise FingerlyError(f"Not an RFC 3339 timestamp: {value!r}") from None
 
 
+@_decoding
 def parse_document(payload: Mapping[str, Any]) -> EventDocument:
     """Builds an :class:`EventDocument` from an archived document mapping."""
     sdk_raw = payload.get("sdk")
@@ -455,21 +692,17 @@ def parse_document(payload: Mapping[str, Any]) -> EventDocument:
     att_raw = payload.get("attestation")
     attestation = _parse_attestation(att_raw) if isinstance(att_raw, Mapping) else None
     return EventDocument(
-        schema=int(payload.get("schema", 1)),
+        schema=_integer(payload, "schema", 1),
         request_id=_require(payload, "request_id", str),
         occurred_at=parse_instant(_require(payload, "occurred_at", str)),
-        sdk_platform=str(sdk.get("platform", "")),
-        sdk_version=str(sdk.get("version", "")),
-        ip_network=payload.get("ip_network") or None,
-        ip=payload.get("ip") if isinstance(payload.get("ip"), Mapping) else None,
-        ip_error=payload.get("ip_error"),
-        risk=payload.get("risk") if isinstance(payload.get("risk"), Mapping) else None,
+        sdk_platform=_text(sdk, "platform"),
+        sdk_version=_text(sdk, "version"),
+        ip_network=_optional(payload, "ip_network", str) or None,
+        ip=_optional(payload, "ip", Mapping),
+        ip_error=_optional(payload, "ip_error", str),
+        risk=_optional(payload, "risk", Mapping),
         attestation=attestation,
-        velocity=(
-            payload.get("velocity")
-            if isinstance(payload.get("velocity"), Mapping)
-            else None
-        ),
+        velocity=_optional(payload, "velocity", Mapping),
         raw=payload,
     )
 
@@ -480,38 +713,112 @@ def _parse_attestation(payload: Mapping[str, Any]) -> Attestation:
     return Attestation(
         state=_require(payload, "state", str),
         status=_require(payload, "status", str),
-        platform=payload.get("platform"),
-        reason=payload.get("reason"),
-        chain_length=payload.get("chain_length"),
-        attestation_security_level=payload.get("attestation_security_level"),
-        keymint_security_level=payload.get("keymint_security_level"),
-        device_locked=payload.get("device_locked"),
-        verified_boot_state=payload.get("verified_boot_state"),
-        nonce=payload.get("nonce"),
-        revocation_checked=bool(payload.get("revocation_checked", False)),
-        package_bound=bool(payload.get("package_bound", False)),
-        signer_bound=bool(payload.get("signer_bound", False)),
-        attest_skipped=payload.get("attest_skipped"),
-        downgrade=bool(payload.get("downgrade", False)),
-        mode=payload.get("mode"),
-        app_id=payload.get("app_id"),
-        environment=payload.get("environment"),
-        receipt=payload.get("receipt"),
-        risk_metric=payload.get("risk_metric"),
-        risk_metric_age_h=payload.get("risk_metric_age_h"),
-        device_check=payload.get("device_check"),
+        platform=_optional(payload, "platform", str),
+        reason=_optional(payload, "reason", str),
+        chain_length=_optional(payload, "chain_length", int),
+        attestation_security_level=_optional(
+            payload, "attestation_security_level", str
+        ),
+        keymint_security_level=_optional(payload, "keymint_security_level", str),
+        device_locked=_optional(payload, "device_locked", bool),
+        verified_boot_state=_optional(payload, "verified_boot_state", str),
+        nonce=_optional(payload, "nonce", str),
+        revocation_checked=_flag(payload, "revocation_checked"),
+        package_bound=_flag(payload, "package_bound"),
+        signer_bound=_flag(payload, "signer_bound"),
+        attest_skipped=_optional(payload, "attest_skipped", str),
+        downgrade=_flag(payload, "downgrade"),
+        mode=_optional(payload, "mode", str),
+        app_id=_optional(payload, "app_id", str),
+        environment=_optional(payload, "environment", str),
+        receipt=_optional(payload, "receipt", str),
+        risk_metric=_optional(payload, "risk_metric", int),
+        risk_metric_age_h=_optional(payload, "risk_metric_age_h", int),
+        device_check=_optional(payload, "device_check", str),
         play_integrity=play if isinstance(play, Mapping) else None,
         raw=payload,
     )
 
 
-def _parse_trigger(payload: Mapping[str, Any]) -> EventTrigger:
+def _parse_ai(payload: Any) -> Optional[AIAgent]:
+    """Builds the :class:`AIAgent` of an ``ai_bot`` event, or None when absent.
+
+    Values are kept as sent, so an unknown purpose, runtime or verification
+    value parses.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    verification_raw = payload.get("verification")
+    verification: Mapping[str, Any] = (
+        verification_raw if isinstance(verification_raw, Mapping) else {}
+    )
+    return AIAgent(
+        name=_text(payload, "name"),
+        provider=_text(payload, "provider"),
+        purpose=_text(payload, "purpose"),
+        runtime=_text(payload, "runtime"),
+        declared=_flag(payload, "declared"),
+        verification=AIVerification(
+            method=_text(verification, "method"),
+            result=_text(verification, "result"),
+        ),
+    )
+
+
+def _parse_trigger(payload: Any) -> EventTrigger:
     """Builds one :class:`EventTrigger`, tolerating a missing confidence."""
+    if not isinstance(payload, Mapping):
+        raise FingerlyError("The Fingerly API response has an unreadable trigger")
     return EventTrigger(
         signal=_require(payload, "signal", str),
-        weight=int(payload.get("weight", 0)),
-        confidence=payload.get("confidence"),
+        weight=_integer(payload, "weight", 0),
+        confidence=_optional(payload, "confidence", str),
     )
+
+
+def _optional(payload: Mapping[str, Any], name: str, kind: type) -> Any:
+    """Reads a field the API may leave out, or None.
+
+    A value of another type is dropped too, so a field never holds anything
+    but the type it is declared with; ``raw`` still has what was sent.
+    """
+    value = payload.get(name)
+    if isinstance(value, bool) and kind is not bool:
+        return None
+    return value if isinstance(value, kind) else None
+
+
+def _text(payload: Mapping[str, Any], name: str) -> str:
+    """Reads a string field, or ``""`` when it is absent or not a string."""
+    value = payload.get(name)
+    return value if isinstance(value, str) else ""
+
+
+def _flag(payload: Mapping[str, Any], name: str) -> bool:
+    """Reads a boolean field; anything but ``true`` is False."""
+    return payload.get(name) is True
+
+
+def _integer(payload: Mapping[str, Any], name: str, default: int) -> int:
+    """Reads an integer field, or ``default`` when it is absent or unusable."""
+    value = payload.get(name)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return default
+
+
+def _list(payload: Mapping[str, Any], name: str) -> list[Any]:
+    """Reads a list field, empty when absent.
+
+    Raises:
+        FingerlyError: If the field holds something other than a list.
+    """
+    value = payload.get(name)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise FingerlyError(f"The Fingerly API response has an unreadable {name!r}")
+    return value
 
 
 def _require(payload: Mapping[str, Any], name: str, kind: type) -> Any:

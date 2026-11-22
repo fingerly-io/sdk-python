@@ -6,7 +6,7 @@ import asyncio
 import threading
 import time
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from types import TracebackType
 from typing import Any, Optional, TypeVar, Union
@@ -31,6 +31,8 @@ from ._errors import (
 )
 from ._http import MAX_RESPONSE_BYTES, AsyncPool, Reply, ResponseTooLargeError, SyncPool
 from ._models import (
+    AgentSighting,
+    AgentSightingsResult,
     ConsumeResult,
     DeviceCheckBits,
     DeviceCheckWriteResult,
@@ -38,6 +40,7 @@ from ._models import (
     EventPage,
     VerifyResult,
     failed_check,
+    parse_agent_sightings,
     parse_consume,
     parse_device_check_bits,
     parse_device_check_write,
@@ -55,6 +58,7 @@ from ._transport import (
     headers_for,
     is_not_found,
     list_params,
+    sightings_body,
     verify_options,
 )
 
@@ -132,6 +136,7 @@ class _BaseFingerly:
                 response.body,
                 self._secret_key,
                 response.headers.get("retry-after"),
+                response.headers.get("fingerly-ratelimit-scope"),
             )
         return decode_json(response.body, response.status)
 
@@ -244,6 +249,9 @@ class Events:
         limit: int = 10,
         visitor: Optional[str] = None,
         level: Optional[str] = None,
+        kind: Optional[str] = None,
+        ai_provider: Optional[str] = None,
+        ai_purpose: Optional[str] = None,
     ) -> EventPage:
         """Lists events within the retention window, newest first.
 
@@ -255,12 +263,20 @@ class Events:
             visitor: Restrict to one exact visitor id.
             level: Restrict to ``low``, ``medium`` or ``high``; a
                 :class:`SuspectLevel` member works too.
+            kind: Restrict to one visitor kind, a :class:`VisitorKind`
+                member such as ``VisitorKind.AI_BOT``.
+            ai_provider: Restrict to one AI agent operator, exactly as events
+                name it (case sensitive), such as ``OpenAI``.
+            ai_purpose: Restrict to one AI agent purpose, an
+                :class:`AIPurpose` member such as ``AIPurpose.USER_FETCH``.
 
         Raises:
             TypeError: If a bound, page or limit is unusable.
             FingerlyAPIError: On any non-2xx response.
         """
-        params = list_params(from_, to, page, limit, visitor, level)
+        params = list_params(
+            from_, to, page, limit, visitor, level, kind, ai_provider, ai_purpose
+        )
         return parse_page(self._client._request("/events", params))
 
 
@@ -324,21 +340,96 @@ class AsyncEvents:
         limit: int = 10,
         visitor: Optional[str] = None,
         level: Optional[str] = None,
+        kind: Optional[str] = None,
+        ai_provider: Optional[str] = None,
+        ai_purpose: Optional[str] = None,
     ) -> EventPage:
         """Lists events within the retention window, newest first.
 
         See :meth:`Events.list`; this coroutine takes the same arguments.
         """
-        params = list_params(from_, to, page, limit, visitor, level)
+        params = list_params(
+            from_, to, page, limit, visitor, level, kind, ai_provider, ai_purpose
+        )
         return parse_page(await self._client._request("/events", params))
 
 
-class DeviceCheck:
-    """Spends the DeviceCheck token held for an iOS event, once.
+class Agents:
+    """Reports the requests your server served. Reached as ``fingerly.agents``.
 
-    Reached as ``fingerly.device_check``. Each held token pays for one Apple
-    call: a read or a write, never both. To read the bits and then set them,
-    read on one identification and write on the next.
+    Most code uses :class:`AgentSightings`, which batches, remembers the
+    answers and never delays a request. This is the call underneath it.
+    """
+
+    def __init__(self, client: Fingerly) -> None:
+        self._client = client
+
+    def sightings(
+        self, items: Sequence[AgentSighting], *, timeout: Optional[float] = None
+    ) -> AgentSightingsResult:
+        """Reports up to 200 served requests and reads what sent each one.
+
+        Never retried: a report the server may have counted is not sent again.
+        An item the server cannot use (a field over 4096 bytes, an address
+        that is not one literal, a count over 1000000) is answered
+        :attr:`VisitorKind.UNKNOWN` with ``ttl`` 0 in its place, and the
+        others as usual.
+
+        Args:
+            items: The requests, as raw input, at most 200.
+            timeout: Replaces the client timeout for this call, in seconds.
+
+        Raises:
+            TypeError: If an item is not an :class:`AgentSighting`. Nothing
+                is sent.
+            FingerlyAPIError: On any non-2xx answer. A ``429`` carries
+                ``retry_after`` and ``rate_limit_scope`` (``daily`` for the
+                daily allowance); ``422 invalid_request`` means no item in the
+                batch was usable.
+            FingerlyTimeoutError: If the call exceeds its deadline.
+            FingerlyConnectionError: If the API could not be reached.
+        """
+        body = sightings_body(items)
+        deadline = None if timeout is None else positive_seconds(timeout, "timeout")
+        return parse_agent_sightings(
+            self._client._request(
+                _SIGHTINGS_PATH, method="POST", content=body, timeout=deadline
+            )
+        )
+
+
+class AsyncAgents:
+    """Asyncio sightings reports. Reached as ``fingerly.agents``.
+
+    See :class:`Agents`; the coroutine takes the same arguments.
+    """
+
+    def __init__(self, client: AsyncFingerly) -> None:
+        self._client = client
+
+    async def sightings(
+        self, items: Sequence[AgentSighting], *, timeout: Optional[float] = None
+    ) -> AgentSightingsResult:
+        """Reports served requests. See :meth:`Agents.sightings`."""
+        body = sightings_body(items)
+        deadline = None if timeout is None else positive_seconds(timeout, "timeout")
+        return parse_agent_sightings(
+            await self._client._request(
+                _SIGHTINGS_PATH, method="POST", content=body, timeout=deadline
+            )
+        )
+
+
+_SIGHTINGS_PATH = "/agents/sightings"
+
+
+class DeviceCheck:
+    """Spends the DeviceCheck tokens held for an iOS event, each once.
+
+    Reached as ``fingerly.device_check``. An event holds a read token and a
+    write token, and each pays for one Apple call: a read spends the read
+    token, a write the write token. To read the bits and then set them, read
+    and write with the same request ID.
 
     A ``503 device_check_unavailable`` or a transport failure is retried with
     the identical request: a token kept after an answer that was not definite
@@ -349,7 +440,7 @@ class DeviceCheck:
         self._client = client
 
     def query(self, request_id: str) -> DeviceCheckBits:
-        """Reads the device's two bits from Apple, spending the event's token.
+        """Reads the device's two bits from Apple, spending the read token.
 
         Args:
             request_id: The ``request_id`` of an iOS identification made within
@@ -369,7 +460,7 @@ class DeviceCheck:
         bit0: Optional[bool] = None,
         bit1: Optional[bool] = None,
     ) -> DeviceCheckWriteResult:
-        """Sets bit0, bit1 or both with Apple, spending the event's token.
+        """Sets bit0, bit1 or both with Apple, spending the write token.
 
         A bit left as None keeps its value.
 
@@ -509,10 +600,15 @@ class Fingerly(_BaseFingerly):
         self._pool = SyncPool(build, self._timeout, limits, transport)
         self.events = Events(self)
         self.device_check = DeviceCheck(self)
+        self.agents = Agents(self)
 
     def close(self) -> None:
         """Closes the pooled connections. Safe to call more than once."""
         self._pool.close()
+
+    @property
+    def _closed(self) -> bool:
+        return self._pool.closed
 
     def __enter__(self: _Self) -> _Self:
         return self
@@ -532,8 +628,11 @@ class Fingerly(_BaseFingerly):
         *,
         method: str = "GET",
         content: Optional[bytes] = None,
+        timeout: Optional[float] = None,
     ) -> Mapping[str, Any]:
         """Performs one request and decodes its body. Never retries.
+
+        ``timeout`` replaces the client's deadline for this request.
 
         Raises:
             FingerlyTimeoutError: If the request exceeds the client timeout.
@@ -548,6 +647,7 @@ class Fingerly(_BaseFingerly):
                 params=params,
                 content=content,
                 headers=_JSON_BODY if content is not None else None,
+                deadline=timeout,
             )
         except httpx.TimeoutException as error:
             raise FingerlyTimeoutError() from error
@@ -607,10 +707,15 @@ class AsyncFingerly(_BaseFingerly):
         self._pool = AsyncPool(build, self._timeout, limits, transport)
         self.events = AsyncEvents(self)
         self.device_check = AsyncDeviceCheck(self)
+        self.agents = AsyncAgents(self)
 
     async def aclose(self) -> None:
         """Closes the pooled connections. Safe to call more than once."""
         await self._pool.aclose()
+
+    @property
+    def _closed(self) -> bool:
+        return self._pool.closed
 
     async def __aenter__(self: _Self) -> _Self:
         return self
@@ -630,8 +735,11 @@ class AsyncFingerly(_BaseFingerly):
         *,
         method: str = "GET",
         content: Optional[bytes] = None,
+        timeout: Optional[float] = None,
     ) -> Mapping[str, Any]:
         """Performs one request and decodes its body. Never retries.
+
+        ``timeout`` replaces the client's deadline for this request.
 
         Raises:
             FingerlyTimeoutError: If the request exceeds the client timeout.
@@ -645,6 +753,7 @@ class AsyncFingerly(_BaseFingerly):
                 params=params,
                 content=content,
                 headers=_JSON_BODY if content is not None else None,
+                deadline=timeout,
             )
         except httpx.TimeoutException as error:
             raise FingerlyTimeoutError() from error

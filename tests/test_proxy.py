@@ -243,7 +243,7 @@ class TestForwarding:
             assert upstream.headers["x-fingerly-origin"] == "https://shop.test"
             assert upstream.headers["x-fingerly-user-agent"] == "Firefox"
             assert upstream.headers["idempotency-key"] == "idem-1"
-            assert upstream.headers["x-fingerly-proxy-version"] == "python/0.4.1"
+            assert upstream.headers["x-fingerly-proxy-version"] == "python/0.5.0"
             assert "cookie" not in upstream.headers
             assert "authorization" not in upstream.headers
 
@@ -1078,3 +1078,66 @@ class TestV3RelayConformance:
             assert sent.headers["sec-ch-ua"] == '"Chromium";v="130"'
             assert sent.headers["sec-ch-ua-mobile"] == "?0"
             assert sent.headers["sec-ch-ua-platform"] == '"macOS"'
+
+    def test_forwards_web_bot_auth_headers_and_drops_an_oversized_one(self) -> None:
+        signed = {
+            "signature": "sig1=:dGVzdC1zaWduYXR1cmU=:",
+            "signature-input": (
+                'sig1=("@authority" "signature-agent");created=1735689600;'
+                'keyid="k1";alg="ed25519";tag="web-bot-auth"'
+            ),
+            "signature-agent": '"https://chatgpt.com"',
+        }
+        at_cap = '"https://' + "a" * (4096 - 10) + '"'
+        assert len(at_cap) == 4096
+        upstream = httpx.Response(
+            200,
+            content=b'{"request_id":"one"}',
+            headers={
+                "content-type": "application/json",
+                "x-request-id": "one",
+                "fingerly-balance-micros": "100",
+            },
+        )
+        recorder = Recorder(upstream)
+        app = proxy(recorder, allowed_origins=["https://app.shop.test"])
+        for adapter, call in both(app):
+            base = {
+                "x-api-key": PUBLIC_KEY,
+                "origin": "https://app.shop.test",
+                "host": "shop.test",
+                "x-custom-token": "app-header",
+                **signed,
+            }
+            status, headers, body = call(adapter, headers=base)
+            assert status == 200
+            assert body == b'{"request_id":"one"}'
+            assert headers["x-request-id"] == "one"
+            assert headers["cache-control"] == "no-store"
+            assert "fingerly-balance-micros" not in headers
+            sent = recorder.requests[-1].headers
+            assert sent["signature"] == signed["signature"]
+            assert sent["signature-input"] == signed["signature-input"]
+            assert sent["signature-agent"] == signed["signature-agent"]
+            assert sent["x-fingerly-host"] == "shop.test"
+            assert "x-custom-token" not in sent
+
+            oversized = {
+                **base,
+                "signature": "sig1=:" + "A" * 4097 + ":",
+                "signature-agent": at_cap,
+            }
+            status, _, _ = call(adapter, headers=oversized)
+            assert status == 200
+            sent = recorder.requests[-1].headers
+            assert "signature" not in sent
+            assert sent["signature-input"] == signed["signature-input"]
+            assert sent["signature-agent"] == at_cap
+
+            _, pre_headers, _ = call(
+                adapter,
+                method="OPTIONS",
+                headers={"origin": "https://app.shop.test"},
+                body=b"",
+            )
+            assert "signature" not in pre_headers["access-control-allow-headers"]
