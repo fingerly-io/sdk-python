@@ -601,6 +601,10 @@ class Fingerly(_BaseFingerly):
         """Closes the pooled connections. Safe to call more than once."""
         self._pool.close()
 
+    @property
+    def _closed(self) -> bool:
+        return self._pool.closed
+
     def __enter__(self: _Self) -> _Self:
         return self
 
@@ -703,6 +707,10 @@ class AsyncFingerly(_BaseFingerly):
     async def aclose(self) -> None:
         """Closes the pooled connections. Safe to call more than once."""
         await self._pool.aclose()
+
+    @property
+    def _closed(self) -> bool:
+        return self._pool.closed
 
     async def __aenter__(self: _Self) -> _Self:
         return self

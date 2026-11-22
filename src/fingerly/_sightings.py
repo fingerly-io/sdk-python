@@ -13,6 +13,7 @@ sends the buffer. Every failure leaves requests served as usual.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import dataclasses
 import hashlib
@@ -75,6 +76,8 @@ BACKOFF_START = 1.0
 BACKOFF_MAX = 60.0
 #: Each kind of failure is logged at most once per this many seconds.
 LOG_EVERY = 60.0
+#: The longest the flush at shutdown (interpreter exit, ASGI lifespan) takes.
+SHUTDOWN_DEADLINE = 5.0
 
 #: Response content types reported by default.
 DEFAULT_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
@@ -222,6 +225,8 @@ async def _acquire_within(lock: asyncio.Lock, timeout: float) -> bool:
 
 
 _instances: weakref.WeakSet[_BaseSightings] = weakref.WeakSet()
+# Serialises the reset of a process that forked without telling Python.
+_fork_guard = threading.Lock()
 
 
 def _after_fork_in_child() -> None:
@@ -229,8 +234,20 @@ def _after_fork_in_child() -> None:
         instance._reset_after_fork()
 
 
+def _flush_at_exit() -> None:
+    """Sends what each sync instance still holds when the interpreter exits.
+
+    A gunicorn worker exits this way after SIGTERM. Bounded by
+    :data:`SHUTDOWN_DEADLINE` overall, and never raises.
+    """
+    for instance in list(_instances):
+        with contextlib.suppress(Exception):
+            instance._flush_at_exit()
+
+
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_after_fork_in_child)
+atexit.register(_flush_at_exit)
 
 
 class _BaseSightings:
@@ -267,6 +284,7 @@ class _BaseSightings:
 
     def _reset_state(self) -> None:
         """Everything that belongs to one process; the cache is kept."""
+        self._pid = os.getpid()
         self._lock = threading.Lock()
         self._log_lock = threading.Lock()
         self._pending: OrderedDict[str, _Pending] = OrderedDict()
@@ -283,6 +301,29 @@ class _BaseSightings:
         """Runs in a forked child: the parent still owns what it buffered."""
         self._reset_state()
 
+    def _check_fork(self) -> None:
+        """Resets a child whose fork Python's hooks did not see.
+
+        uWSGI and other servers that fork from C skip ``os.register_at_fork``,
+        so the child would keep the parent's buffer, a lock the parent may
+        have held and a flusher thread that does not exist in it.
+        """
+        if self._pid == os.getpid():
+            return
+        with _fork_guard:
+            if self._pid != os.getpid():
+                self._reset_after_fork()
+
+    def _flush_at_exit(self) -> None:
+        """Sends what is pending as the interpreter exits, where it can."""
+
+    async def _flush_at_shutdown(self) -> None:
+        """Sends what is pending when an ASGI server shuts the app down.
+
+        Bounded by :data:`SHUTDOWN_DEADLINE`, never raises, and leaves the
+        instance usable: the same app may be started again.
+        """
+
     @property
     def dropped(self) -> int:
         """Requests not reported because the buffer was full, in this process.
@@ -295,6 +336,7 @@ class _BaseSightings:
     @property
     def pending(self) -> int:
         """Reports waiting to be sent, in flight included."""
+        self._check_fork()
         with self._lock:
             return len(self._pending) + self._in_flight
 
@@ -320,6 +362,7 @@ class _BaseSightings:
             observed = self._observe(proxy_request)
             if observed is None:
                 return AGENT_UNKNOWN
+            self._check_fork()
             now = self._clock()
             with self._lock:
                 hit = self._cache.get(observed.key)
@@ -435,6 +478,7 @@ class _BaseSightings:
 
     def _record(self, observed: _Observed) -> None:
         """Adds one sighting to the buffer, folding repeats into a count."""
+        self._check_fork()
         now = self._clock()
         with self._lock:
             if self._closed:
@@ -639,6 +683,18 @@ class _BaseSightings:
             return max(0.0, (midnight - now).total_seconds())
         return RATE_LIMIT_PAUSE
 
+    def _abandon(self, batch: Sequence[_Pending], written: bool) -> None:
+        """Settles a batch whose send was interrupted rather than answered.
+
+        Without this the batch would stay in flight for good, and no report
+        would ever be sent again. One that may have reached the server is
+        dropped, as after a timeout; one that cannot have is kept.
+        """
+        with self._lock:
+            self._in_flight = 0
+            if not written:
+                self._restore(batch)
+
     def _restore(self, batch: Sequence[_Pending]) -> None:
         """Puts a kept batch back as the oldest reports. Holds the lock."""
         for entry in reversed(batch):
@@ -774,24 +830,55 @@ class AgentSightings(_BaseSightings):
         early while reporting is paused or when a batch fails, and never
         raises. Call it before a serverless invocation ends.
         """
+        self._flush(None)
+
+    def _flush(self, budget: Optional[float]) -> None:
+        """:meth:`flush`, ending within ``budget`` seconds when one is given."""
+        ends = None if budget is None else time.monotonic() + budget
         try:
+            self._check_fork()
             while True:
-                if not self._send_lock.acquire(timeout=FLUSH_WAIT):
+                left = FLUSH_WAIT if ends is None else ends - time.monotonic()
+                if left <= 0 or not self._send_lock.acquire(
+                    timeout=min(left, FLUSH_WAIT)
+                ):
                     return
                 try:
+                    deadline = FLUSH_DEADLINE
+                    if ends is not None:
+                        deadline = min(deadline, ends - time.monotonic())
+                    if deadline <= 0:
+                        return
                     batch = self._take(self._clock(), force=True)
-                    if batch is None or not self._send(batch):
+                    if batch is None or not self._send(batch, deadline):
                         return
                 finally:
                     self._send_lock.release()
         except Exception:
             self._log("flush", "Agent sightings could not flush")
 
+    def _flush_at_exit(self) -> None:
+        if self._closed or self._pid != os.getpid() or self._client._closed:
+            return
+        self._stopping = True
+        self._event.set()
+        self._flush(SHUTDOWN_DEADLINE)
+
+    async def _flush_at_shutdown(self) -> None:
+        if self._closed or self._client._closed:
+            return
+        # The sync client blocks, so it runs off the event loop.
+        with contextlib.suppress(Exception):
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._flush, SHUTDOWN_DEADLINE
+            )
+
     def close(self) -> None:
         """Stops the flusher and sends what is pending. Safe to call twice.
 
         The client stays open: it is yours to close.
         """
+        self._check_fork()
         self._stopping = True
         self._event.set()
         thread = self._thread
@@ -841,16 +928,20 @@ class AgentSightings(_BaseSightings):
             except Exception:
                 self._log("flush", "Agent sightings could not flush")
 
-    def _send(self, batch: list[_Pending]) -> bool:
+    def _send(self, batch: list[_Pending], deadline: float = FLUSH_DEADLINE) -> bool:
         """Sends one batch and settles it. Holds the send lock."""
         progress = RequestProgress()
         token = REQUEST_PROGRESS.set(progress)
         try:
             result = self._client.agents.sightings(
-                self._items_of(batch), timeout=FLUSH_DEADLINE
+                self._items_of(batch), timeout=deadline
             )
         except Exception as error:
             return self._settle(batch, None, error, progress.written)
+        except BaseException:
+            # Interrupted, as by KeyboardInterrupt during close().
+            self._abandon(batch, progress.written)
+            raise
         finally:
             REQUEST_PROGRESS.reset(token)
         return self._settle(batch, result, None)
@@ -918,22 +1009,40 @@ class AsyncAgentSightings(_BaseSightings):
         Cancelling the task that awaits it cancels it, as with any coroutine;
         nothing else is raised.
         """
+        await self._flush(None)
+
+    async def _flush(self, budget: Optional[float]) -> None:
+        """:meth:`flush`, ending within ``budget`` seconds when one is given."""
+        ends = None if budget is None else time.monotonic() + budget
         try:
+            self._check_fork()
             lock = self._lock_for_loop()
             while True:
-                if not await _acquire_within(lock, FLUSH_WAIT):
+                left = FLUSH_WAIT if ends is None else ends - time.monotonic()
+                if left <= 0 or not await _acquire_within(lock, min(left, FLUSH_WAIT)):
                     return
                 try:
+                    deadline = FLUSH_DEADLINE
+                    if ends is not None:
+                        deadline = min(deadline, ends - time.monotonic())
+                    if deadline <= 0:
+                        return
                     batch = self._take(self._clock(), force=True)
-                    if batch is None or not await self._send(batch):
+                    if batch is None or not await self._send(batch, deadline):
                         return
                 finally:
                     lock.release()
         except Exception:
             self._log("flush", "Agent sightings could not flush")
 
+    async def _flush_at_shutdown(self) -> None:
+        if self._closed or self._client._closed:
+            return
+        await self._flush(SHUTDOWN_DEADLINE)
+
     async def aclose(self) -> None:
         """Stops the flusher and sends what is pending. Safe to call twice."""
+        self._check_fork()
         self._stopping = True
         task = self._task
         if self._event is not None:
@@ -1005,15 +1114,21 @@ class AsyncAgentSightings(_BaseSightings):
             except Exception:
                 self._log("flush", "Agent sightings could not flush")
 
-    async def _send(self, batch: list[_Pending]) -> bool:
+    async def _send(
+        self, batch: list[_Pending], deadline: float = FLUSH_DEADLINE
+    ) -> bool:
         progress = RequestProgress()
         token = REQUEST_PROGRESS.set(progress)
         try:
             result = await self._client.agents.sightings(
-                self._items_of(batch), timeout=FLUSH_DEADLINE
+                self._items_of(batch), timeout=deadline
             )
         except Exception as error:
             return self._settle(batch, None, error, progress.written)
+        except BaseException:
+            # Cancelled, as when the loop shuts down mid-report.
+            self._abandon(batch, progress.written)
+            raise
         finally:
             REQUEST_PROGRESS.reset(token)
         return self._settle(batch, result, None)

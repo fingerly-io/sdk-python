@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import math
+import os
 import ssl
 import threading
 import time
@@ -33,6 +34,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Callable, Generic, Optional, TypeVar, Union
 
 import httpx
+
+# Serialises forgetting a parent's connections in a forked child.
+_fork_guard = threading.Lock()
 
 #: The largest response body read from the API, after decoding.
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -297,6 +301,14 @@ class _Shards(Generic[C]):
         self.closed = True
         return shards
 
+    def forget(self) -> None:
+        """Drops every pool unclosed, in a forked child.
+
+        Closing them would shut connections the parent still uses; the
+        child's copies of the sockets are released when collected.
+        """
+        self._active = []
+
     @property
     def connections(self) -> int:
         """Connections currently open across the pools, for diagnostics."""
@@ -327,6 +339,7 @@ class SyncPool:
             make, limits or DEFAULT_LIMITS, fixed=transport is not None
         )
         self._lock = threading.Lock()
+        self._pid = os.getpid()
 
     def request(
         self,
@@ -348,6 +361,7 @@ class SyncPool:
             ResponseTooLargeError: When the body exceeds the cap.
             RuntimeError: When the pool has been closed.
         """
+        self._check_fork()
         with self._lock:
             if self._shards.closed:
                 raise RuntimeError("The Fingerly client has been closed")
@@ -386,10 +400,31 @@ class SyncPool:
 
     def close(self) -> None:
         """Closes every connection. Safe to call more than once."""
+        self._check_fork()
         with self._lock:
             shards = self._shards.drain()
         for shard in shards:
             shard.client.close()
+
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`close` has run."""
+        return self._shards.closed
+
+    def _check_fork(self) -> None:
+        """Forgets the parent's connections and lock in a forked child.
+
+        A forked worker must never write to a connection its parent or a
+        sibling also holds, and the parent may have held the lock at the
+        fork. Checked per request, since uWSGI and other servers fork from C
+        without running Python's fork hooks.
+        """
+        if self._pid != os.getpid():
+            with _fork_guard:
+                if self._pid != os.getpid():
+                    self._lock = threading.Lock()
+                    self._shards.forget()
+                    self._pid = os.getpid()
 
     @property
     def connections(self) -> int:
@@ -420,6 +455,7 @@ class AsyncPool:
         self._shards: _Shards[httpx.AsyncClient] = _Shards(
             make, limits or DEFAULT_LIMITS, fixed=transport is not None
         )
+        self._pid = os.getpid()
 
     async def request(
         self,
@@ -443,6 +479,7 @@ class AsyncPool:
         """
         if self._shards.closed:
             raise RuntimeError("The Fingerly client has been closed")
+        self._check_fork()
         shard, idle = self._shards.acquire()
         progress = REQUEST_PROGRESS.get()
         extensions = {"trace": _async_trace(progress)} if progress else None
@@ -465,6 +502,19 @@ class AsyncPool:
         """Closes every connection. Safe to call more than once."""
         for shard in self._shards.drain():
             await shard.client.aclose()
+
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`aclose` has run."""
+        return self._shards.closed
+
+    def _check_fork(self) -> None:
+        """Forgets the parent's connections in a forked child."""
+        if self._pid != os.getpid():
+            with _fork_guard:
+                if self._pid != os.getpid():
+                    self._shards.forget()
+                    self._pid = os.getpid()
 
     @property
     def connections(self) -> int:

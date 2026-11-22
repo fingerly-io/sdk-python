@@ -29,7 +29,9 @@ class SightingsASGI:
     """An ASGI application that reports the responses of the one it wraps.
 
     Built by :meth:`AgentSightings.asgi` or :meth:`AsyncAgentSightings.asgi`.
-    Lifespan and websocket connections pass straight through.
+    Websocket connections pass straight through. Lifespan passes through
+    too, except that the server's shutdown message first sends what is
+    pending, within 5 seconds, before your app sees it.
     """
 
     def __init__(self, app: ASGIApp, sightings: _BaseSightings) -> None:
@@ -37,7 +39,11 @@ class SightingsASGI:
         self._sightings = sightings
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope.get("type") != "http":
+        kind = scope.get("type")
+        if kind == "lifespan":
+            await self._lifespan(scope, receive, send)
+            return
+        if kind != "http":
             await self._app(scope, receive, send)
             return
         sightings = self._sightings
@@ -48,25 +54,58 @@ class SightingsASGI:
         async def watching(message: Message) -> None:
             nonlocal content_type, started, reported
             await send(message)
-            kind = message.get("type")
-            if kind == "http.response.start":
-                started = True
-                content_type = _content_type(message.get("headers", ()))
-            elif (
-                kind == "http.response.body"
-                and started
-                and not reported
-                and not message.get("more_body", False)
-            ):
-                reported = True
-                try:
+            # Only what the response already did is looked at, and nothing
+            # here may fail the app's own send.
+            try:
+                event = message.get("type")
+                if event == "http.response.start":
+                    started = True
+                    content_type = _content_type(message.get("headers", ()))
+                elif (
+                    event == "http.response.body"
+                    and started
+                    and not reported
+                    and not message.get("more_body", False)
+                ):
+                    reported = True
                     sightings._report(_asgi_request(scope), content_type)
-                except Exception:
-                    sightings._log(
-                        "report", "Agent sightings could not record a request"
-                    )
+            except Exception:
+                sightings._log("report", "Agent sightings could not record a request")
 
         await self._app(scope, receive, watching)
+
+    async def _lifespan(self, scope: Scope, receive: Receive, send: Send) -> None:
+        sightings = self._sightings
+        listened = False
+
+        async def receiving() -> Message:
+            nonlocal listened
+            listened = True
+            message = await receive()
+            if message.get("type") == "lifespan.shutdown":
+                await sightings._flush_at_shutdown()
+            return message
+
+        try:
+            await self._app(scope, receiving, send)
+        except Exception:
+            if listened:
+                raise
+            # The app refused lifespan without reading a message, as
+            # Django's ASGI handler does. Answer it here instead, so the
+            # server's shutdown still sends what is pending.
+            await self._serve_lifespan(receive, send)
+
+    async def _serve_lifespan(self, receive: Receive, send: Send) -> None:
+        while True:
+            message = await receive()
+            kind = message.get("type")
+            if kind == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif kind == "lifespan.shutdown":
+                await self._sightings._flush_at_shutdown()
+                await send({"type": "lifespan.shutdown.complete"})
+                return
 
 
 def _content_type(headers: Iterable[tuple[bytes, bytes]]) -> Optional[str]:
@@ -95,16 +134,20 @@ class SightingsWSGI:
         def watching(
             status: str, headers: list[tuple[str, str]], exc_info: Any = None
         ) -> Any:
-            seen[:] = [
-                next(
-                    (
-                        value
-                        for name, value in headers
-                        if name.lower() == "content-type"
-                    ),
-                    None,
-                )
-            ]
+            try:
+                seen[:] = [
+                    next(
+                        (
+                            value
+                            for name, value in headers
+                            if name.lower() == "content-type"
+                        ),
+                        None,
+                    )
+                ]
+            except Exception:
+                # Headers the server will judge itself; never fail it here.
+                seen[:] = []
             if exc_info is None:
                 return start_response(status, headers)
             return start_response(status, headers, exc_info)
