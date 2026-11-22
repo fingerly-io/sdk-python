@@ -1475,3 +1475,39 @@ class TestMiddleware:
             return calls
 
         assert run(drive()) == 1
+
+    def test_the_async_flusher_starts_after_reports_made_off_the_loop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sightings_module, "FLUSH_AFTER", 0.05)
+        recorder = answering()
+
+        async def drive() -> int:
+            client = AsyncFingerly(
+                secret_key=SECRET_KEY, transport=recorder.transport()
+            )
+            sightings = AsyncAgentSightings(
+                client,
+                client_ip=lambda incoming: incoming.headers["cf-connecting-ip"],
+            )
+
+            # A sync view's thread reports before the loop has seen any:
+            # there is no loop to start the flusher on yet.
+            def report_twice() -> None:
+                for n in range(2):
+                    sightings.report(request(user_agent=f"a/{n}"), "text/html")
+
+            worker = threading.Thread(target=report_twice)
+            worker.start()
+            worker.join()
+            sightings.report(request(user_agent="a/2"), "text/html")
+            for _ in range(100):
+                if recorder.calls:
+                    break
+                await asyncio.sleep(0.01)
+            calls = recorder.calls
+            await sightings.aclose()
+            await client.aclose()
+            return calls
+
+        assert run(drive()) == 1

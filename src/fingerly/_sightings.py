@@ -511,15 +511,23 @@ class _BaseSightings:
             self._pending[slot] = _Pending(slot, observed, now)
             self._pending_bytes += observed.size
             # The first item always wakes the flusher, which then sleeps out
-            # any pause; a full buffer only wakes it when it may send.
-            wake = len(self._pending) == 1 or (
-                self._size_due() and now >= self._paused_until
+            # any pause; a full buffer only wakes it when it may send. So does
+            # any item while no flusher runs: one recorded where none could
+            # be started, or before the event loop changed.
+            wake = (
+                len(self._pending) == 1
+                or self._flusher_missing()
+                or (self._size_due() and now >= self._paused_until)
             )
         if wake:
             self._wake()
 
     def _wake(self) -> None:
         """Tells the background flusher there is something to look at."""
+
+    def _flusher_missing(self) -> bool:
+        """True when a background flusher should run and none does."""
+        return False
 
     def _stopped(self) -> bool:
         """Read afresh after a wait: :meth:`close` sets it from elsewhere."""
@@ -1109,16 +1117,20 @@ class AsyncAgentSightings(_BaseSightings):
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            # Recorded off the loop: hand the wake-up to the loop, if any.
-            if self._loop is not None and self._event is not None:
+            # Recorded off the loop: hand the wake-up to the loop, if any,
+            # which also starts the flusher there when it is not running.
+            if self._loop is not None:
                 with contextlib.suppress(RuntimeError):
-                    self._loop.call_soon_threadsafe(self._event.set)
+                    self._loop.call_soon_threadsafe(self._wake)
             return
         self._lock_for_loop()
         if self._task is None or self._task.done():
             self._task = loop.create_task(self._run())
         assert self._event is not None
         self._event.set()
+
+    def _flusher_missing(self) -> bool:
+        return self._background and (self._task is None or self._task.done())
 
     async def _run(self) -> None:
         """The flusher task: sleeps until a report is due, then sends it."""
