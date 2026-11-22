@@ -395,6 +395,84 @@ class TestInterruptedSend:
         assert run(drive()) == 1
 
 
+HUGE_RETRY_AFTER = [
+    "2147483647",
+    "99999999999999999999",
+    "9" * 400,  # parses as an infinite float
+    "Fri, 01 Jan 2100 00:00:00 GMT",
+]
+
+
+def rate_limited(retry_after: str) -> Recorder:
+    return Recorder(
+        httpx.Response(
+            429,
+            json={"error": {"code": "rate_limited", "message": "slow down"}},
+            headers={"retry-after": retry_after},
+        )
+    )
+
+
+class TestHugeRetryAfter:
+    """A 429 pauses reporting for 1 second to 24 hours, never for good."""
+
+    @pytest.mark.parametrize("retry_after", HUGE_RETRY_AFTER)
+    def test_the_thread_flusher_survives_and_pauses_a_day(
+        self, retry_after: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        failures: list[Any] = []
+        monkeypatch.setattr(threading, "excepthook", failures.append)
+        recorder = rate_limited(retry_after)
+        sightings = sync_sightings(recorder, background=True)
+        try:
+            for n in range(200):  # a full batch: the flusher sends at once
+                sightings.report(visitor(n), "text/html")
+            deadline = time.monotonic() + 5
+            while recorder.calls == 0 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.2)  # the flusher now waits out the pause
+            pause = sightings._paused_until - sightings._clock()
+            assert recorder.calls == 1
+            assert 86000 < pause <= sightings_module.MAX_RATE_LIMIT_PAUSE
+            assert sightings._thread is not None and sightings._thread.is_alive()
+            assert failures == []
+        finally:
+            sightings._stopping = True
+            sightings._event.set()
+
+    @pytest.mark.parametrize("retry_after", HUGE_RETRY_AFTER)
+    def test_the_task_flusher_survives_and_pauses_a_day(self, retry_after: str) -> None:
+        recorder = rate_limited(retry_after)
+
+        async def drive() -> float:
+            client = AsyncFingerly(
+                secret_key=SECRET_KEY, transport=recorder.transport()
+            )
+            sightings = AsyncAgentSightings(
+                client, client_ip=lambda request: request.peer_host
+            )
+            for n in range(200):
+                sightings.report(visitor(n), "text/html")
+            for _ in range(500):
+                if recorder.calls:
+                    break
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.2)
+            task = sightings._task
+            assert task is not None and not task.done()
+            pause = sightings._paused_until - sightings._clock()
+            sightings._stopping = True
+            assert sightings._event is not None
+            sightings._event.set()
+            await task
+            await client.aclose()
+            return pause
+
+        pause = run(drive())
+        assert recorder.calls == 1
+        assert 86000 < pause <= sightings_module.MAX_RATE_LIMIT_PAUSE
+
+
 class TestMiddlewareNeverFailsTheResponse:
     def test_odd_asgi_response_headers(self) -> None:
         sightings = sync_sightings(answering())

@@ -67,6 +67,10 @@ AUTH_PAUSE = 60.0
 RATE_LIMIT_PAUSE = 60.0
 #: The shortest pause after a ``429``, whatever its ``Retry-After`` says.
 MIN_RATE_LIMIT_PAUSE = 1.0
+#: The longest pause after a ``429``, whatever its ``Retry-After`` says. A
+#: larger value, or one too large to sleep on, would stop reporting for the
+#: life of the process.
+MAX_RATE_LIMIT_PAUSE = 86400.0
 #: The longest an answer is remembered, in seconds, whatever its ``ttl``.
 MAX_TTL = 86400.0
 #: The longest :meth:`AgentSightings.flush` waits for a report in flight.
@@ -526,7 +530,9 @@ class _BaseSightings:
             else:
                 oldest = next(iter(self._pending.values()))
                 due = oldest.first_seen + FLUSH_AFTER
-            return max(0.0, max(due, self._paused_until) - now)
+            wait = max(0.0, max(due, self._paused_until) - now)
+            # Never a wait a thread or the event loop cannot sleep on.
+            return min(wait, MAX_RATE_LIMIT_PAUSE)
 
     def _take(self, now: float, force: bool) -> Optional[list[_Pending]]:
         """Moves the next batch in flight, when one may be sent now."""
@@ -674,7 +680,11 @@ class _BaseSightings:
 
     def _rate_limit_pause(self, error: FingerlyAPIError) -> float:
         if error.retry_after is not None:
-            return max(MIN_RATE_LIMIT_PAUSE, error.retry_after)
+            # Clamped to between 1 second and 24 hours: 2147483647, a
+            # 20-digit number or a date in 2100 must not pause for good.
+            return min(
+                MAX_RATE_LIMIT_PAUSE, max(MIN_RATE_LIMIT_PAUSE, error.retry_after)
+            )
         if error.rate_limit_scope == "daily":
             now = self._utc_now()
             midnight = datetime(
