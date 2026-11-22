@@ -242,11 +242,16 @@ def _flush_at_exit() -> None:
     """Sends what each sync instance still holds when the interpreter exits.
 
     A gunicorn worker exits this way after SIGTERM. Bounded by
-    :data:`SHUTDOWN_DEADLINE` overall, and never raises.
+    :data:`SHUTDOWN_DEADLINE` overall, however many instances there are, and
+    never raises.
     """
+    ends = time.monotonic() + SHUTDOWN_DEADLINE
     for instance in list(_instances):
+        left = ends - time.monotonic()
+        if left <= 0:
+            return
         with contextlib.suppress(Exception):
-            instance._flush_at_exit()
+            instance._flush_at_exit(left)
 
 
 if hasattr(os, "register_at_fork"):
@@ -318,8 +323,11 @@ class _BaseSightings:
             if self._pid != os.getpid():
                 self._reset_after_fork()
 
-    def _flush_at_exit(self) -> None:
-        """Sends what is pending as the interpreter exits, where it can."""
+    def _flush_at_exit(self, budget: Optional[float] = None) -> None:
+        """Sends what is pending as the interpreter exits, where it can.
+
+        Within ``budget`` seconds, :data:`SHUTDOWN_DEADLINE` when None.
+        """
 
     async def _flush_at_shutdown(self) -> None:
         """Sends what is pending when an ASGI server shuts the app down.
@@ -875,12 +883,12 @@ class AgentSightings(_BaseSightings):
         except Exception:
             self._log("flush", "Agent sightings could not flush")
 
-    def _flush_at_exit(self) -> None:
+    def _flush_at_exit(self, budget: Optional[float] = None) -> None:
         if self._closed or self._pid != os.getpid() or self._client._closed:
             return
         self._stopping = True
         self._event.set()
-        self._flush(SHUTDOWN_DEADLINE)
+        self._flush(SHUTDOWN_DEADLINE if budget is None else budget)
 
     async def _flush_at_shutdown(self) -> None:
         if self._closed or self._client._closed:

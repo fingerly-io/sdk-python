@@ -251,6 +251,28 @@ class TestShutdown:
         finally:
             release.set()
 
+    def test_the_exit_flush_is_bounded_across_instances(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sightings_module, "SHUTDOWN_DEADLINE", 0.5)
+        monkeypatch.setattr(
+            sightings_module, "_instances", type(sightings_module._instances)()
+        )
+        busy = []
+        for n in range(3):
+            sightings = sync_sightings(answering())
+            sightings.report(visitor(n), "text/html")
+            # A report of its own in flight: the exit flush can only wait.
+            sightings._send_lock.acquire()
+            busy.append(sightings)
+        started = time.monotonic()
+        try:
+            sightings_module._flush_at_exit()
+            assert time.monotonic() - started < 0.9
+        finally:
+            for sightings in busy:
+                sightings._send_lock.release()
+
     def test_the_exit_flush_skips_closed_and_closed_client(self) -> None:
         recorder = answering()
         closed = sync_sightings(recorder)
