@@ -173,7 +173,8 @@ from fingerly import AIPurpose, VisitorKind
 
 page = fingerly.events.list(kind=VisitorKind.AI_BOT, ai_purpose=AIPurpose.USER_FETCH)
 for event in page.rows:
-    print(event.ai.provider, event.ai.name)
+    if event.ai is not None:
+        print(event.ai.provider, event.ai.name)
 ```
 - `Event` declares every documented field as an attribute and falls back to the decoded body for fields added later, so a new server field needs no SDK upgrade.
 
@@ -202,12 +203,13 @@ Consumption comes last, only when every other check passed, so one event backs o
 from fingerly import SuspectLevel, VerifyReason
 
 result = fingerly.events.verify(request_id, tag="checkout")
+event = result.event
 if result.reason == VerifyReason.ALREADY_CONSUMED:
     refuse_replay()
-elif not result.ok:
+elif not result.ok or event is None:
     refuse(result.reason)
-elif result.event.suspect_level == SuspectLevel.HIGH:
-    send_to_review(result.event)
+elif event.suspect_level == SuspectLevel.HIGH:
+    send_to_review(event)
 else:
     allow()
 ```
@@ -455,9 +457,9 @@ Every failure fails open: requests keep being served and `lookup` keeps answerin
 
 ### Processes, threads and serverless
 
-`AgentSightings` sends from a daemon thread, which never keeps the process alive. A forked worker (gunicorn, uWSGI) starts with an empty buffer and its own thread; answers already remembered are kept. `AsyncAgentSightings` sends from a task on the loop that serves your requests.
+`AgentSightings` sends from a daemon thread, which never keeps the process alive. A forked worker (gunicorn, uWSGI, also with `--preload` or without lazy apps) starts with an empty buffer, its own thread and its own connections; answers already remembered are kept. `AsyncAgentSightings` sends from a task on the loop that serves your requests.
 
-Call `close()` (or `await aclose()`) on shutdown to send what is pending. Where the process is frozen between invocations, build it with `background=False` and call `flush()` (or `await flush()`) before each invocation ends.
+What is pending is sent on a graceful shutdown without any code of yours, within 5 seconds: the ASGI middleware sends it when the server's lifespan shutdown arrives (uvicorn, gunicorn's uvicorn worker, Django's ASGI handler included), and `AgentSightings` sends it when the interpreter exits, as a gunicorn or uWSGI worker does after `SIGTERM`. Call `close()` (or `await aclose()`) yourself where your app has a shutdown hook of its own. Where the process is frozen between invocations, build it with `background=False` and call `flush()` (or `await flush()`) before each invocation ends.
 
 The call underneath is `fingerly.agents.sightings([...])`, taking `AgentSighting` items and returning `AgentSightingsResult`. A refusal raises `FingerlyAPIError` with `retry_after` and, on a `429`, `rate_limit_scope` (`daily` for the daily allowance).
 
@@ -486,6 +488,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fingerly import (
     AsyncFingerly,
     FingerlyAPIError,
+    FingerlyError,
     FingerlyEventPendingError,
     FingerlyProxy,
 )
@@ -522,6 +525,9 @@ async def verify(request_id: str, request: Request):
         raise HTTPException(503, headers={"Retry-After": retry_after}) from None
     except FingerlyAPIError as error:
         raise HTTPException(404 if error.status == 404 else 502) from None
+    except FingerlyError:
+        # A timeout or an unreachable API: answer it, never a 500.
+        raise HTTPException(503, headers={"Retry-After": "2"}) from None
     return {
         "identifiable": event.identifiable,
         "visitor_id": event.visitor_id,
@@ -603,7 +609,7 @@ async def application(scope, receive, send):
 # mysite/views.py
 from django.http import JsonResponse
 
-from fingerly import FingerlyAPIError, FingerlyEventPendingError
+from fingerly import FingerlyAPIError, FingerlyError, FingerlyEventPendingError
 from mysite.identification import fingerly
 
 
@@ -619,6 +625,11 @@ def verify(request, request_id):
     except FingerlyAPIError as error:
         status = 404 if error.status == 404 else 502
         return JsonResponse({"error": error.code}, status=status)
+    except FingerlyError:
+        # A timeout or an unreachable API: answer it, never a 500.
+        return JsonResponse(
+            {"error": "unavailable"}, status=503, headers={"Retry-After": "2"}
+        )
     return JsonResponse(
         {
             "identifiable": event.identifiable,
@@ -656,6 +667,7 @@ from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from fingerly import (
     Fingerly,
     FingerlyAPIError,
+    FingerlyError,
     FingerlyEventPendingError,
     FingerlyProxy,
 )
@@ -682,6 +694,9 @@ def verify(request_id):
         return {"error": error.code}, 503, {"Retry-After": retry_after}
     except FingerlyAPIError as error:
         abort(404 if error.status == 404 else 502)
+    except FingerlyError:
+        # A timeout or an unreachable API: answer it, never a 500.
+        return {"error": "unavailable"}, 503, {"Retry-After": "2"}
     return {
         "identifiable": event.identifiable,
         "visitor_id": event.visitor_id,
