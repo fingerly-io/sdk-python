@@ -69,6 +69,7 @@ class Signal(_StrEnum):
     JAILBREAK = "jailbreak"
     ROOTED_DEVICE = "rooted_device"
     ROOT_APPS = "root_apps"
+    BOOTLOADER_UNLOCKED = "bootloader_unlocked"
     PLAY_DEVICE_INTEGRITY_FAILED = "play_device_integrity_failed"
     CLONED_APP = "cloned_app"
     APP_CLONER = "app_cloner"

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+- Names the Android `bootloader_unlocked` signal and its group.
+
 ## 0.5.0
 
 - Added `AgentSightings` and `AsyncAgentSightings`, which report the

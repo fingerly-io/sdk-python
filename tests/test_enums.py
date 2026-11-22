@@ -54,6 +54,7 @@ SERVER_SIGNALS = {
     "automation",
     "bad_bot",
     "bogon_ip",
+    "bootloader_unlocked",
     "bot",
     "browser_tampering",
     "cloned_app",
