@@ -7,14 +7,42 @@ new server field does not require an SDK upgrade.
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 from ._enums import Signal, VerifyReason
 from ._errors import FingerlyError
+
+_Parsed = TypeVar("_Parsed")
+
+
+def _decoding(
+    parse: Callable[[Mapping[str, Any]], _Parsed],
+) -> Callable[[Mapping[str, Any]], _Parsed]:
+    """Makes a parser raise only :class:`FingerlyError` on an unusable body.
+
+    The parsers check every field they read, so this is the backstop: a body
+    shaped in a way nobody foresaw must still surface as the SDK's own error,
+    never as a ``TypeError`` or ``AttributeError`` in the caller's handler.
+    """
+
+    @functools.wraps(parse)
+    def parsing(payload: Mapping[str, Any]) -> _Parsed:
+        if not isinstance(payload, Mapping):
+            raise FingerlyError("The Fingerly API response is unreadable")
+        try:
+            return parse(payload)
+        except FingerlyError:
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError, IndexError) as error:
+            raise FingerlyError("The Fingerly API response is unreadable") from error
+
+    return parsing
+
 
 _INSTANT = re.compile(
     r"\A(?P<date>\d{4}-\d{2}-\d{2})[Tt ](?P<clock>\d{2}:\d{2}:\d{2})"
@@ -434,6 +462,7 @@ class AgentSightingsResult:
     items: Sequence[AgentAnswer]
 
 
+@_decoding
 def parse_agent_sightings(payload: Mapping[str, Any]) -> AgentSightingsResult:
     """Builds :class:`AgentSightingsResult` from a sightings answer.
 
@@ -462,6 +491,7 @@ def parse_agent_sightings(payload: Mapping[str, Any]) -> AgentSightingsResult:
     return AgentSightingsResult(rules_version=rules_version, items=tuple(answers))
 
 
+@_decoding
 def parse_consume(payload: Mapping[str, Any]) -> ConsumeResult:
     """Builds :class:`ConsumeResult` from a consume answer."""
     return ConsumeResult(
@@ -474,6 +504,7 @@ def parse_consume(payload: Mapping[str, Any]) -> ConsumeResult:
 _UNKNOWN_INSTANT = datetime.min.replace(tzinfo=timezone.utc)
 
 
+@_decoding
 def parse_verified_event(
     payload: Mapping[str, Any],
 ) -> tuple[Event, Optional[datetime]]:
@@ -526,6 +557,7 @@ def failed_check(
     return VerifyReason.OK
 
 
+@_decoding
 def parse_device_check_bits(payload: Mapping[str, Any]) -> DeviceCheckBits:
     """Builds :class:`DeviceCheckBits` from a query answer."""
     last_update = payload.get("last_update")
@@ -539,6 +571,7 @@ def parse_device_check_bits(payload: Mapping[str, Any]) -> DeviceCheckBits:
     )
 
 
+@_decoding
 def parse_device_check_write(payload: Mapping[str, Any]) -> DeviceCheckWriteResult:
     """Builds :class:`DeviceCheckWriteResult` from a write answer."""
     bit0, bit1 = payload.get("bit0"), payload.get("bit1")
@@ -548,6 +581,7 @@ def parse_device_check_write(payload: Mapping[str, Any]) -> DeviceCheckWriteResu
     )
 
 
+@_decoding
 def parse_event(payload: Mapping[str, Any]) -> Event:
     """Builds an :class:`Event` from a decoded response body.
 
@@ -569,33 +603,34 @@ def parse_event(payload: Mapping[str, Any]) -> Event:
         platform=_require(payload, "platform", str),
         sdk_platform=_require(payload, "sdk_platform", str),
         sdk_version=_require(payload, "sdk_version", str),
-        has_document=bool(payload.get("has_document", False)),
-        triggers=[_parse_trigger(row) for row in payload.get("triggers") or ()],
-        reason=payload.get("reason"),
-        suspect_score=payload.get("suspect_score"),
-        suspect_level=payload.get("suspect_level"),
-        origin=payload.get("origin"),
-        url_host=payload.get("url_host"),
-        url_path=payload.get("url_path"),
-        tag=payload.get("tag"),
-        project_id=payload.get("project_id"),
-        ip_network=payload.get("ip_network") or None,
-        country_code=payload.get("country_code"),
-        country_name=payload.get("country_name"),
-        asn=payload.get("asn"),
-        asn_name=payload.get("asn_name"),
-        anonymity_network=payload.get("anonymity_network"),
-        agent=payload.get("agent"),
-        agent_version=payload.get("agent_version"),
-        os=payload.get("os"),
-        device_kind=payload.get("device_kind"),
-        visitor_kind=payload.get("visitor_kind"),
+        has_document=_flag(payload, "has_document"),
+        triggers=[_parse_trigger(row) for row in _list(payload, "triggers")],
+        reason=_optional(payload, "reason", str),
+        suspect_score=_optional(payload, "suspect_score", int),
+        suspect_level=_optional(payload, "suspect_level", str),
+        origin=_optional(payload, "origin", str),
+        url_host=_optional(payload, "url_host", str),
+        url_path=_optional(payload, "url_path", str),
+        tag=_optional(payload, "tag", str),
+        project_id=_optional(payload, "project_id", str),
+        ip_network=_optional(payload, "ip_network", str) or None,
+        country_code=_optional(payload, "country_code", str),
+        country_name=_optional(payload, "country_name", str),
+        asn=_optional(payload, "asn", str),
+        asn_name=_optional(payload, "asn_name", str),
+        anonymity_network=_optional(payload, "anonymity_network", str),
+        agent=_optional(payload, "agent", str),
+        agent_version=_optional(payload, "agent_version", str),
+        os=_optional(payload, "os", str),
+        device_kind=_optional(payload, "device_kind", str),
+        visitor_kind=_optional(payload, "visitor_kind", str),
         ai=_parse_ai(payload.get("ai")),
-        document=payload.get("document"),
+        document=_optional(payload, "document", Mapping),
         raw=payload,
     )
 
 
+@_decoding
 def parse_page(payload: Mapping[str, Any]) -> EventPage:
     """Builds an :class:`EventPage` from a decoded response body.
 
@@ -603,9 +638,9 @@ def parse_page(payload: Mapping[str, Any]) -> EventPage:
         FingerlyError: If the page or any of its rows is unusable.
     """
     return EventPage(
-        rows=[parse_event(row) for row in payload.get("rows") or ()],
-        page=int(payload.get("page", 0)),
-        page_size=int(payload.get("page_size", 0)),
+        rows=[parse_event(row) for row in _list(payload, "rows")],
+        page=_integer(payload, "page", 0),
+        page_size=_integer(payload, "page_size", 0),
     )
 
 
@@ -628,11 +663,16 @@ def parse_instant(value: str) -> datetime:
         if match.group("sign") is None
         else f"{match.group('sign')}{match.group('hours')}:{match.group('minutes')}"
     )
-    return datetime.fromisoformat(
-        f"{match.group('date')}T{match.group('clock')}.{micros}{offset}"
-    )
+    try:
+        return datetime.fromisoformat(
+            f"{match.group('date')}T{match.group('clock')}.{micros}{offset}"
+        )
+    except ValueError:
+        # Shaped right, but no such instant, such as month 13.
+        raise FingerlyError(f"Not an RFC 3339 timestamp: {value!r}") from None
 
 
+@_decoding
 def parse_document(payload: Mapping[str, Any]) -> EventDocument:
     """Builds an :class:`EventDocument` from an archived document mapping."""
     sdk_raw = payload.get("sdk")
@@ -640,21 +680,17 @@ def parse_document(payload: Mapping[str, Any]) -> EventDocument:
     att_raw = payload.get("attestation")
     attestation = _parse_attestation(att_raw) if isinstance(att_raw, Mapping) else None
     return EventDocument(
-        schema=int(payload.get("schema", 1)),
+        schema=_integer(payload, "schema", 1),
         request_id=_require(payload, "request_id", str),
         occurred_at=parse_instant(_require(payload, "occurred_at", str)),
-        sdk_platform=str(sdk.get("platform", "")),
-        sdk_version=str(sdk.get("version", "")),
-        ip_network=payload.get("ip_network") or None,
-        ip=payload.get("ip") if isinstance(payload.get("ip"), Mapping) else None,
-        ip_error=payload.get("ip_error"),
-        risk=payload.get("risk") if isinstance(payload.get("risk"), Mapping) else None,
+        sdk_platform=_text(sdk, "platform"),
+        sdk_version=_text(sdk, "version"),
+        ip_network=_optional(payload, "ip_network", str) or None,
+        ip=_optional(payload, "ip", Mapping),
+        ip_error=_optional(payload, "ip_error", str),
+        risk=_optional(payload, "risk", Mapping),
         attestation=attestation,
-        velocity=(
-            payload.get("velocity")
-            if isinstance(payload.get("velocity"), Mapping)
-            else None
-        ),
+        velocity=_optional(payload, "velocity", Mapping),
         raw=payload,
     )
 
@@ -665,26 +701,28 @@ def _parse_attestation(payload: Mapping[str, Any]) -> Attestation:
     return Attestation(
         state=_require(payload, "state", str),
         status=_require(payload, "status", str),
-        platform=payload.get("platform"),
-        reason=payload.get("reason"),
-        chain_length=payload.get("chain_length"),
-        attestation_security_level=payload.get("attestation_security_level"),
-        keymint_security_level=payload.get("keymint_security_level"),
-        device_locked=payload.get("device_locked"),
-        verified_boot_state=payload.get("verified_boot_state"),
-        nonce=payload.get("nonce"),
-        revocation_checked=bool(payload.get("revocation_checked", False)),
-        package_bound=bool(payload.get("package_bound", False)),
-        signer_bound=bool(payload.get("signer_bound", False)),
-        attest_skipped=payload.get("attest_skipped"),
-        downgrade=bool(payload.get("downgrade", False)),
-        mode=payload.get("mode"),
-        app_id=payload.get("app_id"),
-        environment=payload.get("environment"),
-        receipt=payload.get("receipt"),
-        risk_metric=payload.get("risk_metric"),
-        risk_metric_age_h=payload.get("risk_metric_age_h"),
-        device_check=payload.get("device_check"),
+        platform=_optional(payload, "platform", str),
+        reason=_optional(payload, "reason", str),
+        chain_length=_optional(payload, "chain_length", int),
+        attestation_security_level=_optional(
+            payload, "attestation_security_level", str
+        ),
+        keymint_security_level=_optional(payload, "keymint_security_level", str),
+        device_locked=_optional(payload, "device_locked", bool),
+        verified_boot_state=_optional(payload, "verified_boot_state", str),
+        nonce=_optional(payload, "nonce", str),
+        revocation_checked=_flag(payload, "revocation_checked"),
+        package_bound=_flag(payload, "package_bound"),
+        signer_bound=_flag(payload, "signer_bound"),
+        attest_skipped=_optional(payload, "attest_skipped", str),
+        downgrade=_flag(payload, "downgrade"),
+        mode=_optional(payload, "mode", str),
+        app_id=_optional(payload, "app_id", str),
+        environment=_optional(payload, "environment", str),
+        receipt=_optional(payload, "receipt", str),
+        risk_metric=_optional(payload, "risk_metric", int),
+        risk_metric_age_h=_optional(payload, "risk_metric_age_h", int),
+        device_check=_optional(payload, "device_check", str),
         play_integrity=play if isinstance(play, Mapping) else None,
         raw=payload,
     )
@@ -703,25 +741,72 @@ def _parse_ai(payload: Any) -> Optional[AIAgent]:
         verification_raw if isinstance(verification_raw, Mapping) else {}
     )
     return AIAgent(
-        name=str(payload.get("name", "")),
-        provider=str(payload.get("provider", "")),
-        purpose=str(payload.get("purpose", "")),
-        runtime=str(payload.get("runtime", "")),
-        declared=bool(payload.get("declared", False)),
+        name=_text(payload, "name"),
+        provider=_text(payload, "provider"),
+        purpose=_text(payload, "purpose"),
+        runtime=_text(payload, "runtime"),
+        declared=_flag(payload, "declared"),
         verification=AIVerification(
-            method=str(verification.get("method", "")),
-            result=str(verification.get("result", "")),
+            method=_text(verification, "method"),
+            result=_text(verification, "result"),
         ),
     )
 
 
-def _parse_trigger(payload: Mapping[str, Any]) -> EventTrigger:
+def _parse_trigger(payload: Any) -> EventTrigger:
     """Builds one :class:`EventTrigger`, tolerating a missing confidence."""
+    if not isinstance(payload, Mapping):
+        raise FingerlyError("The Fingerly API response has an unreadable trigger")
     return EventTrigger(
         signal=_require(payload, "signal", str),
-        weight=int(payload.get("weight", 0)),
-        confidence=payload.get("confidence"),
+        weight=_integer(payload, "weight", 0),
+        confidence=_optional(payload, "confidence", str),
     )
+
+
+def _optional(payload: Mapping[str, Any], name: str, kind: type) -> Any:
+    """Reads a field the API may leave out, or None.
+
+    A value of another type is dropped too, so a field never holds anything
+    but the type it is declared with; ``raw`` still has what was sent.
+    """
+    value = payload.get(name)
+    if isinstance(value, bool) and kind is not bool:
+        return None
+    return value if isinstance(value, kind) else None
+
+
+def _text(payload: Mapping[str, Any], name: str) -> str:
+    """Reads a string field, or ``""`` when it is absent or not a string."""
+    value = payload.get(name)
+    return value if isinstance(value, str) else ""
+
+
+def _flag(payload: Mapping[str, Any], name: str) -> bool:
+    """Reads a boolean field; anything but ``true`` is False."""
+    return payload.get(name) is True
+
+
+def _integer(payload: Mapping[str, Any], name: str, default: int) -> int:
+    """Reads an integer field, or ``default`` when it is absent or unusable."""
+    value = payload.get(name)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return default
+
+
+def _list(payload: Mapping[str, Any], name: str) -> list[Any]:
+    """Reads a list field, empty when absent.
+
+    Raises:
+        FingerlyError: If the field holds something other than a list.
+    """
+    value = payload.get(name)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise FingerlyError(f"The Fingerly API response has an unreadable {name!r}")
+    return value
 
 
 def _require(payload: Mapping[str, Any], name: str, kind: type) -> Any:
