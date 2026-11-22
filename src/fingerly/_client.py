@@ -370,6 +370,10 @@ class Agents:
         """Reports up to 200 served requests and reads what sent each one.
 
         Never retried: a report the server may have counted is not sent again.
+        An item the server cannot use (a field over 4096 bytes, an address
+        that is not one literal, a count over 1000000) is answered
+        :attr:`VisitorKind.UNKNOWN` with ``ttl`` 0 in its place, and the
+        others as usual.
 
         Args:
             items: The requests, as raw input, at most 200.
@@ -380,8 +384,8 @@ class Agents:
                 is sent.
             FingerlyAPIError: On any non-2xx answer. A ``429`` carries
                 ``retry_after`` and ``rate_limit_scope`` (``daily`` for the
-                daily allowance); ``422 invalid_request`` means an item broke
-                a limit.
+                daily allowance); ``422 invalid_request`` means no item in the
+                batch was usable.
             FingerlyTimeoutError: If the call exceeds its deadline.
             FingerlyConnectionError: If the API could not be reached.
         """

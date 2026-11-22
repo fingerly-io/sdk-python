@@ -645,8 +645,8 @@ class _BaseSightings:
                     keep=False,
                     log=(
                         "invalid",
-                        "Agent sightings were refused as invalid (HTTP 422); "
-                        "the batch was dropped",
+                        "Agent sightings were refused as invalid (HTTP 422): "
+                        "no item in the batch was usable; the batch was dropped",
                     ),
                 )
             if status in (401, 403):

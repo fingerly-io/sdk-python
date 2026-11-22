@@ -374,6 +374,48 @@ class TestCache:
         assert sightings.lookup(incoming) is AGENT_UNKNOWN
         assert len(sightings._cache) == 0
 
+    def test_an_item_the_server_could_not_use_leaves_only_itself_unknown(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def handler(sent: httpx.Request) -> httpx.Response:
+            items = json.loads(sent.content)["items"]
+            return json_response(
+                {
+                    "rules_version": "r",
+                    "items": [
+                        {"ttl": 0, "visitor_kind": VisitorKind.UNKNOWN.value}
+                        if item["user_agent"] == "unusable"
+                        else {"ttl": 60, "visitor_kind": VisitorKind.HUMAN.value}
+                        for item in items
+                    ],
+                }
+            )
+
+        recorder = Recorder.of(handler)
+        sightings = build(recorder)
+        for user_agent in ("first", "unusable", "third"):
+            seen(sightings, request(user_agent=user_agent))
+        with caplog.at_level(logging.DEBUG, logger="fingerly.agents"):
+            sightings.flush()
+            sightings.flush()
+        assert [item["user_agent"] for item in sent_items(recorder)] == [
+            "first",
+            "unusable",
+            "third",
+        ]
+        assert recorder.calls == 1
+        assert sightings.lookup(request(user_agent="first")).visitor_kind == (
+            VisitorKind.HUMAN
+        )
+        assert sightings.lookup(request(user_agent="unusable")) is AGENT_UNKNOWN
+        assert sightings.lookup(request(user_agent="third")).visitor_kind == (
+            VisitorKind.HUMAN
+        )
+        assert len(sightings._cache) == 2
+        assert sightings.pending == 0
+        assert sightings.dropped == 0
+        assert caplog.records == []
+
     def test_a_ttl_is_clamped_to_one_day(self) -> None:
         clock = Clock()
         sightings = build(answering(ttl=30 * 86400), clock)

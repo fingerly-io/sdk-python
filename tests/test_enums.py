@@ -128,8 +128,9 @@ PINNED: dict[type[Enum], set[str]] = {
     EventState: {"pending", "enriched", "unavailable"},
     # server/models/enums.go (Environment).
     Environment: {"production", "staging", "development"},
-    # server/domain/agent/agent.go (Kind).
-    VisitorKind: {"human", "ai_bot", "automation", "search_crawler"},
+    # server/domain/agent/agent.go (Kind) and server/schemas/agents.go
+    # (SightingUnreadable, only in an agent sightings answer).
+    VisitorKind: {"human", "ai_bot", "automation", "search_crawler", "unknown"},
     # server/models/ai.go (AIPurpose, AIRuntime, AIVerificationMethod and
     # AIVerificationResult).
     AIPurpose: {"training", "search", "user_fetch", "agent"},
@@ -270,9 +271,9 @@ class TestServerSources:
         }
 
     def test_visitor_kinds(self) -> None:
-        assert _go_constants("domain/agent/agent.go", "Kind") == {
-            member.value for member in VisitorKind
-        }
+        kinds = _go_constants("domain/agent/agent.go", "Kind")
+        unreadable = _go_constants("schemas/agents.go", "SightingUnreadable")
+        assert kinds | unreadable == {member.value for member in VisitorKind}
 
     @pytest.mark.parametrize(
         "enum",

@@ -441,7 +441,7 @@ elif answer.visitor_kind == VisitorKind.AI_BOT and answer.ai is not None:
         ...  # it claims to be an agent its operator does not vouch for
 ```
 
-Each answer holds `ttl`, `visitor_kind`, `agent` and, for an AI agent, `ai` with the same fields as on events. A signed request (Web Bot Auth) is checked by the server every time, so `lookup` never remembers it.
+Each answer holds `ttl`, `visitor_kind`, `agent` and, for an AI agent, `ai` with the same fields as on events. A signed request (Web Bot Auth) is checked by the server every time, so `lookup` never remembers it. A request the server could not use is answered `VisitorKind.UNKNOWN` with `ttl` 0, so `lookup` never remembers it either and keeps answering `AGENT_UNKNOWN`; the other requests of the report are answered as usual.
 
 ### What is sent
 
@@ -453,7 +453,7 @@ Never sent, and never logged: the path, the query string, cookies, `Authorizatio
 
 Answers live in a per-process LRU of 4096 entries by default (`cache_size`, at most 65536), a few hundred bytes each: about 1.5 MB at the default. Reports wait in a buffer of at most 1000 items, where repeats of the same request become one item with a count. It is sent in batches of up to 200 items, when it reaches 200 items or 64 KiB or 2 seconds after its oldest item, with one report in flight and a 5 second deadline. When the buffer is full, new requests are not reported and `sightings.dropped` counts them.
 
-Every failure fails open: requests keep being served and `lookup` keeps answering from memory or with `AGENT_UNKNOWN`. A `429` pauses reporting for its `Retry-After`, held to between 1 second and 24 hours, while the buffer keeps counting, a `503` or an unreachable API is retried with backoff from 1 to 60 seconds, and a rejected key pauses reporting for 60 seconds. Problems are logged on the `fingerly.agents` logger, at most once a minute each.
+Every failure fails open: requests keep being served and `lookup` keeps answering from memory or with `AGENT_UNKNOWN`. A `429` pauses reporting for its `Retry-After`, held to between 1 second and 24 hours, while the buffer keeps counting, a `503` or an unreachable API is retried with backoff from 1 to 60 seconds, a rejected key pauses reporting for 60 seconds, and a `422` (no request in the report was usable) drops the report. Problems are logged on the `fingerly.agents` logger, at most once a minute each.
 
 ### Processes, threads and serverless
 

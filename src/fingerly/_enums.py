@@ -148,12 +148,17 @@ class Environment(_StrEnum):
 
 
 class VisitorKind(_StrEnum):
-    """What sort of client made the request, as in ``Event.visitor_kind``."""
+    """What sort of client made the request, as in ``Event.visitor_kind``.
+
+    - ``UNKNOWN``: only in an agent sightings answer: a request the server
+      could not use; ttl 0, never remembered. An event never carries it.
+    """
 
     HUMAN = "human"
     AI_BOT = "ai_bot"
     AUTOMATION = "automation"
     SEARCH_CRAWLER = "search_crawler"
+    UNKNOWN = "unknown"
 
 
 class AIPurpose(_StrEnum):
