@@ -455,7 +455,8 @@ class AgentSightingsResult:
     Attributes:
         rules_version: Names the classification rules. When it changes, every
             remembered answer is stale.
-        items: One answer per reported request, in the order sent.
+        items: One answer per reported request, in the order sent;
+            :data:`AGENT_UNKNOWN` where the server's answer could not be read.
     """
 
     rules_version: str
@@ -466,29 +467,40 @@ class AgentSightingsResult:
 def parse_agent_sightings(payload: Mapping[str, Any]) -> AgentSightingsResult:
     """Builds :class:`AgentSightingsResult` from a sightings answer.
 
+    An item that cannot be read, such as one without an integer ``ttl`` or a
+    string ``visitor_kind``, is :data:`AGENT_UNKNOWN` in its position, so the
+    other answers still line up with the requests they answer.
+
     Raises:
-        FingerlyError: If ``rules_version`` or ``items`` is missing, or an item
-            lacks ``ttl`` or ``visitor_kind``.
+        FingerlyError: If ``rules_version`` or ``items`` is missing.
     """
     rules_version = _require(payload, "rules_version", str)
     items = _require(payload, "items", list)
-    answers = []
-    for item in items:
-        if not isinstance(item, Mapping):
-            raise FingerlyError("The Fingerly API response has an unreadable item")
-        ttl = item.get("ttl")
-        if not isinstance(ttl, int) or isinstance(ttl, bool):
-            raise FingerlyError("The Fingerly API response is missing 'ttl'")
-        agent = item.get("agent")
-        answers.append(
-            AgentAnswer(
-                ttl=ttl,
-                visitor_kind=_require(item, "visitor_kind", str),
-                agent=agent if isinstance(agent, str) and agent else None,
-                ai=_parse_ai(item.get("ai")),
-            )
-        )
-    return AgentSightingsResult(rules_version=rules_version, items=tuple(answers))
+    return AgentSightingsResult(
+        rules_version=rules_version,
+        items=tuple(_agent_answer(item) for item in items),
+    )
+
+
+def _agent_answer(item: Any) -> AgentAnswer:
+    """One answer of a sightings report, or :data:`AGENT_UNKNOWN` if unreadable."""
+    if not isinstance(item, Mapping):
+        return AGENT_UNKNOWN
+    ttl = item.get("ttl")
+    visitor_kind = item.get("visitor_kind")
+    if (
+        not isinstance(ttl, int)
+        or isinstance(ttl, bool)
+        or not isinstance(visitor_kind, str)
+    ):
+        return AGENT_UNKNOWN
+    agent = item.get("agent")
+    return AgentAnswer(
+        ttl=ttl,
+        visitor_kind=visitor_kind,
+        agent=agent if isinstance(agent, str) and agent else None,
+        ai=_parse_ai(item.get("ai")),
+    )
 
 
 @_decoding

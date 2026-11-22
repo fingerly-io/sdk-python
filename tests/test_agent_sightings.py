@@ -261,6 +261,54 @@ class TestClient:
         assert result.items[0].agent == "GPTBot"
         assert str(recorder.requests[0].url) == SIGHTINGS_URL
 
+    def test_an_unreadable_answer_is_unknown_in_its_place(self) -> None:
+        good = {"ttl": 60, "visitor_kind": "human"}
+        recorder = Recorder(
+            json_response(
+                {
+                    "rules_version": "r",
+                    "items": [
+                        good,
+                        {"ttl": "60", "visitor_kind": "human"},
+                        {"ttl": 60, "visitor_kind": None},
+                        None,
+                        {**good, "agent": "GPTBot"},
+                    ],
+                }
+            )
+        )
+        client = Fingerly(secret_key=SECRET_KEY, transport=recorder.transport())
+        result = client.agents.sightings(
+            [AgentSighting(user_agent=f"a/{n}", client_ip="::1") for n in range(5)]
+        )
+        first, *unreadable, last = result.items
+        assert first.known
+        assert all(answer is AGENT_UNKNOWN for answer in unreadable)
+        assert last.agent == "GPTBot"
+
+    def test_the_flusher_remembers_the_readable_answers(self) -> None:
+        def handler(sent: httpx.Request) -> httpx.Response:
+            items = json.loads(sent.content)["items"]
+            return json_response(
+                {
+                    "rules_version": "r",
+                    "items": [
+                        {"ttl": 60, "visitor_kind": "human"}
+                        if item["user_agent"] == "good"
+                        else {"visitor_kind": "human"}
+                        for item in items
+                    ],
+                }
+            )
+
+        sightings = build(Recorder.of(handler))
+        seen(sightings, request(user_agent="good"))
+        seen(sightings, request(user_agent="bad"))
+        sightings.flush()
+        assert sightings.pending == 0
+        assert sightings.lookup(request(user_agent="good")).known
+        assert sightings.lookup(request(user_agent="bad")) is AGENT_UNKNOWN
+
     def test_refuses_an_item_that_is_not_a_sighting(self) -> None:
         recorder = answering()
         client = Fingerly(secret_key=SECRET_KEY, transport=recorder.transport())
