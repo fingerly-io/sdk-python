@@ -565,11 +565,11 @@ class _BaseSightings:
         batch: Sequence[_Pending],
         result: Optional[AgentSightingsResult],
         error: Optional[BaseException],
-        written: bool = False,
+        progress: Optional[RequestProgress] = None,
     ) -> bool:
         """Applies the answer, or the failure rules, to a batch in flight.
 
-        ``written`` says the request was written in full before ``error``.
+        ``progress`` says how far the request got before ``error``.
 
         Returns:
             True when the batch was answered, so another may follow.
@@ -596,7 +596,7 @@ class _BaseSightings:
                         self._store(entry.key, answer, now + min(answer.ttl, MAX_TTL))
             return True
 
-        outcome = self._classify(error, written)
+        outcome = self._classify(error, progress or RequestProgress())
         with self._lock:
             self._in_flight = 0
             if outcome.keep:
@@ -611,7 +611,9 @@ class _BaseSightings:
             self._log(*outcome.log)
         return False
 
-    def _classify(self, error: Optional[BaseException], written: bool) -> _Outcome:
+    def _classify(
+        self, error: Optional[BaseException], progress: RequestProgress
+    ) -> _Outcome:
         """The section 6 failure table of the agent sightings contract."""
         if isinstance(error, FingerlyAPIError):
             status = error.status
@@ -646,7 +648,13 @@ class _BaseSightings:
                 ),
             )
         if isinstance(error, FingerlyTimeoutError):
-            if isinstance(error.__cause__, (httpx.ConnectTimeout, httpx.PoolTimeout)):
+            # Out of time before the report was written, as while connecting
+            # or in a TLS handshake: the server cannot have counted it. The
+            # async deadline cuts a connect short as a plain timeout, so the
+            # transport's progress tells, where it reports any.
+            if progress.unsent or isinstance(
+                error.__cause__, (httpx.ConnectTimeout, httpx.PoolTimeout)
+            ):
                 return _Outcome(keep=True, backoff=True)
             # Sent, then no answer in time: the server may have counted it,
             # and sending it again would count it twice.
@@ -659,7 +667,7 @@ class _BaseSightings:
                 ),
             )
         if isinstance(error, FingerlyConnectionError):
-            if written:
+            if progress.written:
                 # Closed, reset or cut short once the report was written: the
                 # server may have counted it, as after a timeout. A transport
                 # that cannot tell leaves ``written`` unset, and the batch is
@@ -947,7 +955,7 @@ class AgentSightings(_BaseSightings):
                 self._items_of(batch), timeout=deadline
             )
         except Exception as error:
-            return self._settle(batch, None, error, progress.written)
+            return self._settle(batch, None, error, progress)
         except BaseException:
             # Interrupted, as by KeyboardInterrupt during close().
             self._abandon(batch, progress.written)
@@ -1134,7 +1142,7 @@ class AsyncAgentSightings(_BaseSightings):
                 self._items_of(batch), timeout=deadline
             )
         except Exception as error:
-            return self._settle(batch, None, error, progress.written)
+            return self._settle(batch, None, error, progress)
         except BaseException:
             # Cancelled, as when the loop shuts down mid-report.
             self._abandon(batch, progress.written)

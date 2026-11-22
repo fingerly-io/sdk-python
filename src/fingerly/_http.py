@@ -71,17 +71,24 @@ class RequestProgress:
 
     Set it as :data:`REQUEST_PROGRESS` around a call; the pool marks it from
     the transport's trace. A replacement transport that reports no trace
-    leaves it unmarked, so the caller cannot tell.
+    leaves it unmarked and ``traced`` False, so the caller cannot tell.
     """
 
-    __slots__ = ("written",)
+    __slots__ = ("traced", "written")
 
     def __init__(self) -> None:
+        self.traced = False
         self.written = False
 
     def mark(self, event: str) -> None:
+        self.traced = True
         if event.endswith(".send_request_body.complete"):
             self.written = True
+
+    @property
+    def unsent(self) -> bool:
+        """True when the transport reported progress and the body never left."""
+        return self.traced and not self.written
 
 
 REQUEST_PROGRESS: contextvars.ContextVar[Optional[RequestProgress]] = (

@@ -7,6 +7,7 @@ Fingerly server SDK implements identically.
 from __future__ import annotations
 
 import asyncio
+import gc
 import io
 import json
 import logging
@@ -1038,6 +1039,53 @@ class TestFailures:
             assert server.received == 1
         finally:
             server.stop()
+
+    # httpcore leaves the socket of a TLS handshake cancelled by the async
+    # deadline for the collector to close, which warns.
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    @pytest.mark.filterwarnings("ignore::ResourceWarning")
+    @pytest.mark.parametrize("flavour", ["sync", "async"])
+    def test_a_deadline_spent_connecting_keeps_the_batch(self, flavour: str) -> None:
+        # Accepts the connection and never answers the TLS handshake, so the
+        # report is never written.
+        listener = socket.create_server(("127.0.0.1", 0))
+        endpoint = f"https://127.0.0.1:{listener.getsockname()[1]}"
+
+        def sync_case() -> tuple[int, float]:
+            client = Fingerly(secret_key=SECRET_KEY, endpoint=endpoint)
+            sightings = AgentSightings(
+                client,
+                client_ip=lambda incoming: incoming.headers["cf-connecting-ip"],
+                clock=self.clock,
+                background=False,
+            )
+            sightings.report(request(), "text/html")
+            sightings._flush(0.5)
+            client.close()
+            return sightings.pending, sightings._paused_until
+
+        async def async_case() -> tuple[int, float]:
+            client = AsyncFingerly(secret_key=SECRET_KEY, endpoint=endpoint)
+            sightings = AsyncAgentSightings(
+                client,
+                client_ip=lambda incoming: incoming.headers["cf-connecting-ip"],
+                clock=self.clock,
+                background=False,
+            )
+            sightings.report(request(), "text/html")
+            await sightings._flush(0.5)
+            await client.aclose()
+            return sightings.pending, sightings._paused_until
+
+        try:
+            pending, paused_until = (
+                sync_case() if flavour == "sync" else run(async_case())
+            )
+        finally:
+            listener.close()
+            gc.collect()
+        assert pending == 1
+        assert paused_until == self.clock.now + 1.0  # the first backoff step
 
     @pytest.mark.parametrize("status", [400, 404, 413, 500, 502, 504])
     def test_any_other_status_drops_the_batch(self, status: int) -> None:
