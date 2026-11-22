@@ -32,7 +32,7 @@ Two clients share one API: `Fingerly` for synchronous code such as Django and Fl
 **2. Install.**
 
 ```sh
-pip install "fingerly>=0.4.1"
+pip install "fingerly>=0.5.0"
 ```
 
 **3. Read an event.**
@@ -328,7 +328,7 @@ Responses are marked `no-store`. A redirect is never followed, whatever transpor
 
 Incoming headers follow the sanitize-and-restore sequence: all incoming `x-fingerly-*`, `cookie` and `authorization` headers are stripped, restoring `x-fingerly-sdk-platform` only when it matches an exact lowercase native or bridge platform (`ios`, `android`, `react-native`, `react-native-ios`, `react-native-android`, `flutter`, `flutter-ios`, `flutter-android`, `lynx-ios`, `lynx-android`, `capacitor`, `kotlin-multiplatform`). Requests carrying neither `Origin` nor a validated `x-fingerly-sdk-platform` are rejected locally with `400` (`missing_origin`), and `x-fingerly-origin` is never synthesized from `Host`, `Referer` or the request URL. Exactly one channel goes upstream: a request with an `Origin` is forwarded as a browser call with `x-fingerly-origin` and without the platform header, as the API treats the same request sent to it directly.
 
-Alongside verified proxy metadata (`x-fingerly-host` included), only `content-type`, `x-api-key`, `user-agent`, `idempotency-key`, `sec-fetch-*`, `sec-ch-ua-*` and the Web Bot Auth `signature`, `signature-input` and `signature-agent` (each dropped when over 4096 bytes) are forwarded. Customer cookies and authorization headers are never passed on. The proxy reports itself upstream as `python/0.4.1` in `x-fingerly-proxy-version`, which the dashboard shows per proxy, and sends `fingerly-python/0.4.1` as its user agent.
+Alongside verified proxy metadata (`x-fingerly-host` included), only `content-type`, `x-api-key`, `user-agent`, `idempotency-key`, `sec-fetch-*`, `sec-ch-ua-*` and the Web Bot Auth `signature`, `signature-input` and `signature-agent` (each dropped when over 4096 bytes) are forwarded. Customer cookies and authorization headers are never passed on. The proxy reports itself upstream as `python/0.5.0` in `x-fingerly-proxy-version`, which the dashboard shows per proxy, and sends `fingerly-python/0.5.0` as its user agent.
 
 Back to the browser it relays only `content-type`, `x-request-id`, `ratelimit-limit`, `ratelimit-remaining` and `retry-after`, plus its own `cache-control: no-store` and a `content-length` for the decoded body. A content blocker can match a response header by name, so an allowlist is what keeps anything naming Fingerly off the page.
 

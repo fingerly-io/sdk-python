@@ -243,7 +243,7 @@ class TestForwarding:
             assert upstream.headers["x-fingerly-origin"] == "https://shop.test"
             assert upstream.headers["x-fingerly-user-agent"] == "Firefox"
             assert upstream.headers["idempotency-key"] == "idem-1"
-            assert upstream.headers["x-fingerly-proxy-version"] == "python/0.4.1"
+            assert upstream.headers["x-fingerly-proxy-version"] == "python/0.5.0"
             assert "cookie" not in upstream.headers
             assert "authorization" not in upstream.headers
 
