@@ -1247,18 +1247,27 @@ class TestMiddleware:
 
         async def inner(scope: Any, receive: Any, send: Any) -> None:
             calls.append(scope["type"])
+            if scope["type"] == "lifespan":
+                await receive()
+                await send({"type": "lifespan.startup.complete"})
+                await receive()
+                await send({"type": "lifespan.shutdown.complete"})
 
         sightings = build(answering())
         app = sightings.asgi(inner)
+        messages = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
+        sent: list[str] = []
 
         async def receive() -> Any:
-            return {}
+            return next(messages)
 
-        async def send(_: Any) -> None:
-            return None
+        async def send(message: Any) -> None:
+            sent.append(message["type"])
 
         run(app({"type": "lifespan"}, receive, send))
-        assert calls == ["lifespan"]
+        run(app({"type": "websocket"}, receive, send))
+        assert calls == ["lifespan", "websocket"]
+        assert sent == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
         assert sightings.pending == 0
 
     @pytest.mark.parametrize("extension", ["pathsend", "zerocopysend"])

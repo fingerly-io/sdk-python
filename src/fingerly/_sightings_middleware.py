@@ -86,10 +86,15 @@ class SightingsASGI:
         except Exception:
             if listened:
                 raise
-            # The app refused lifespan without reading a message, as
-            # Django's ASGI handler does. Answer it here instead, so the
-            # server's shutdown still sends what is pending.
-            await self._serve_lifespan(receive, send)
+        else:
+            if listened:
+                return
+        # The app refused lifespan without reading a message, by raising as
+        # Django's ASGI handler does or by returning. Answer it here instead,
+        # so the server's shutdown still sends what is pending: uvicorn
+        # raises SIGTERM again once it has shut down, so the interpreter's
+        # own exit never runs.
+        await self._serve_lifespan(receive, send)
 
     async def _serve_lifespan(self, receive: Receive, send: Send) -> None:
         while True:

@@ -310,11 +310,16 @@ class TestShutdown:
         run(drive_async())
         assert async_recorder.calls == 1
 
-    def test_an_app_without_lifespan_still_flushes_on_shutdown(self) -> None:
+    @pytest.mark.parametrize("refusal", ["raises", "returns"])
+    def test_an_app_without_lifespan_still_flushes_on_shutdown(
+        self, refusal: str
+    ) -> None:
         recorder = answering()
 
         async def django_like(scope: Any, receive: Any, send: Any) -> None:
             if scope["type"] != "http":
+                if refusal == "returns":
+                    return
                 raise ValueError("only http")
 
         async def drive() -> list[str]:
