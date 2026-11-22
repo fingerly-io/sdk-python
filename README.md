@@ -445,7 +445,7 @@ Each answer holds `ttl`, `visitor_kind`, `agent` and, for an AI agent, `ai` with
 
 ### What is sent
 
-For each reported request: the `User-Agent` header, the address from `client_ip`, the `Host`, the method, the Web Bot Auth `Signature`, `Signature-Input` and `Signature-Agent` headers when present, and how many times that same request was seen. A user agent over 4096 bytes is not reported, a signature header over 4096 bytes is left out, and a request whose address cannot be resolved is not reported.
+For each reported request: the `User-Agent` header, the address from `client_ip`, the `Host`, the method, the Web Bot Auth `Signature`, `Signature-Input` and `Signature-Agent` headers when present, and how many times that same request was seen. A request whose user agent or method is over 4096 bytes is not reported, a `Host` or signature header over 4096 bytes is left out, and a request whose address cannot be resolved is not reported.
 
 Never sent, and never logged: the path, the query string, cookies, `Authorization`, any other header, the body or the response.
 

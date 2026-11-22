@@ -57,7 +57,8 @@ BATCH_BYTES = 64 * 1024
 FLUSH_AFTER = 2.0
 #: One deadline, in seconds, over each report.
 FLUSH_DEADLINE = 5.0
-#: Header values longer than this, in UTF-8 bytes, are not reported.
+#: The longest user agent or method reported, and the longest ``Host`` or Web
+#: Bot Auth header sent, in UTF-8 bytes after decoding.
 MAX_HEADER_BYTES = 4096
 #: The largest ``count`` the API accepts for one item.
 MAX_COUNT = 1_000_000
@@ -439,7 +440,13 @@ class _BaseSightings:
         signed = signature is not None and signature_input is not None
         raw_host = request.headers.get("host")
         host = _wire_text(raw_host) if raw_host else None
-        method = request.method or None
+        if _utf8_len(host) > MAX_HEADER_BYTES:
+            # Left out, like an oversize signature header: it only serves
+            # the signature check, and no item may outgrow a report.
+            host = None
+        method = _wire_text(request.method) if request.method else None
+        if _utf8_len(method) > MAX_HEADER_BYTES:
+            return None
         item = AgentSighting(
             user_agent=user_agent,
             client_ip=address,

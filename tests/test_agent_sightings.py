@@ -507,6 +507,60 @@ class TestOversize:
         sightings.flush()
         assert recorder.calls == 1
 
+    def test_a_user_agent_is_measured_as_the_server_reads_it(self) -> None:
+        recorder = answering()
+        sightings = build(recorder)
+        # 1400 bytes that are not UTF-8 become 1400 U+FFFD, 4200 bytes.
+        incoming = ProxyRequest(
+            method="GET",
+            path="/",
+            headers=Headers(
+                [("user-agent", "\xff" * 1400), ("cf-connecting-ip", "20.171.206.9")]
+            ),
+        )
+        seen(sightings, incoming)
+        sightings.flush()
+        assert recorder.calls == 0
+
+    def test_an_oversize_host_is_left_out_and_the_request_reported(self) -> None:
+        recorder = answering()
+        sightings = build(recorder)
+
+        def hosted(user_agent: str, host: str) -> ProxyRequest:
+            return ProxyRequest(
+                method="GET",
+                path="/",
+                headers=Headers(
+                    [
+                        ("host", latin1(host)),
+                        ("user-agent", user_agent),
+                        ("cf-connecting-ip", "20.171.206.9"),
+                    ]
+                ),
+            )
+
+        seen(sightings, hosted(GPTBOT, "h" * 4097))
+        seen(sightings, hosted("other", "é" * 2048))  # two UTF-8 bytes each
+        sightings.flush()
+        first, second = sent_items(recorder)
+        assert "host" not in first
+        assert first["user_agent"] == GPTBOT
+        assert second["host"] == "é" * 2048  # 4096 bytes: kept
+
+    def test_an_oversize_method_is_not_reported(self) -> None:
+        recorder = answering()
+        sightings = build(recorder)
+        incoming = ProxyRequest(
+            method="M" * 4097,
+            path="/",
+            headers=Headers(
+                [("user-agent", GPTBOT), ("cf-connecting-ip", "20.171.206.9")]
+            ),
+        )
+        seen(sightings, incoming)
+        sightings.flush()
+        assert recorder.calls == 0
+
     def test_an_oversize_signature_header_is_left_out(self) -> None:
         recorder = answering()
         sightings = build(recorder)
