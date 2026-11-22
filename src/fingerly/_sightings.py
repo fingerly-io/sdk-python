@@ -238,7 +238,7 @@ class _BaseSightings:
 
     def __init__(
         self,
-        client_ip: Callable[[ProxyRequest], str],
+        client_ip: Callable[[ProxyRequest], Optional[str]],
         cache_size: int,
         content_types: Sequence[str],
         include_paths: Sequence[str],
@@ -691,7 +691,9 @@ class AgentSightings(_BaseSightings):
     Example:
         >>> sightings = AgentSightings(
         ...     fingerly,
-        ...     client_ip=lambda request: request.headers["cf-connecting-ip"],
+        ...     client_ip=lambda request: (
+        ...         request.headers.get("cf-connecting-ip") or request.peer_host
+        ...     ),
         ... )
         >>> app.wsgi_app = sightings.wsgi(app.wsgi_app)
     """
@@ -699,7 +701,7 @@ class AgentSightings(_BaseSightings):
     def __init__(
         self,
         client: Fingerly,
-        client_ip: Callable[[ProxyRequest], str],
+        client_ip: Callable[[ProxyRequest], Optional[str]],
         *,
         cache_size: int = DEFAULT_CACHE_SIZE,
         content_types: Sequence[str] = DEFAULT_CONTENT_TYPES,
@@ -715,8 +717,9 @@ class AgentSightings(_BaseSightings):
             client_ip: Resolves the visitor's address from infrastructure your
                 app trusts, exactly as for :class:`FingerlyProxy`. Never read
                 the left-most ``X-Forwarded-For`` value: the visitor writes
-                it. A request whose address cannot be resolved is not
-                reported.
+                it. Return None when there is no address; a request whose
+                address cannot be resolved is not reported, and is served as
+                usual.
             cache_size: Answers remembered, at most 65536 (larger values are
                 lowered to it). Each costs a few hundred bytes.
             content_types: Response content types reported, replacing the
@@ -868,7 +871,7 @@ class AsyncAgentSightings(_BaseSightings):
     def __init__(
         self,
         client: AsyncFingerly,
-        client_ip: Callable[[ProxyRequest], str],
+        client_ip: Callable[[ProxyRequest], Optional[str]],
         *,
         cache_size: int = DEFAULT_CACHE_SIZE,
         content_types: Sequence[str] = DEFAULT_CONTENT_TYPES,

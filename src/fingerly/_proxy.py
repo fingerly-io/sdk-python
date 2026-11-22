@@ -249,14 +249,16 @@ class FingerlyProxy:
         >>> proxy = FingerlyProxy(
         ...     proxy_key=os.environ["FINGERLY_PROXY_KEY"],
         ...     path="/k7x2qm4a",
-        ...     client_ip=lambda request: request.headers["cf-connecting-ip"],
+        ...     client_ip=lambda request: (
+        ...         request.headers.get("cf-connecting-ip") or request.peer_host
+        ...     ),
         ... )
         >>> app.add_route("/k7x2qm4a", proxy.asgi)
     """
 
     def __init__(
         self,
-        client_ip: Callable[[ProxyRequest], str],
+        client_ip: Callable[[ProxyRequest], Optional[str]],
         proxy_key: Optional[str] = None,
         path: Optional[str] = None,
         api_version: str = "v1",
@@ -275,7 +277,9 @@ class FingerlyProxy:
             client_ip: Resolves the visitor's address from infrastructure your
                 app trusts. Never read the left-most ``X-Forwarded-For`` value:
                 the visitor writes it. Called under both standards, so it must
-                be synchronous.
+                be synchronous. Return None when there is no address, such
+                as ``request.peer_host`` on a server that reports no peer;
+                that request is answered 500 and not forwarded.
             proxy_key: Required. A proxy key, ``fly_px_<environment>_…``, held
                 only on your server. Browsers must present a public key,
                 ``fly_pk_…``, for the same environment.
