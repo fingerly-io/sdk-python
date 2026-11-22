@@ -61,12 +61,7 @@ class SightingsASGI:
                 if event == "http.response.start":
                     started = True
                     content_type = _content_type(message.get("headers", ()))
-                elif (
-                    event == "http.response.body"
-                    and started
-                    and not reported
-                    and not message.get("more_body", False)
-                ):
+                elif started and not reported and _ends_response(message):
                     reported = True
                     sightings._report(_asgi_request(scope), content_type)
             except Exception:
@@ -106,6 +101,21 @@ class SightingsASGI:
                 await self._sightings._flush_at_shutdown()
                 await send({"type": "lifespan.shutdown.complete"})
                 return
+
+
+def _ends_response(message: Message) -> bool:
+    """Whether a send is the response's last body message.
+
+    A file can be sent without any ``http.response.body``: Starlette's
+    ``FileResponse`` uses the pathsend extension where the server offers it
+    (Granian does), and the zero-copy extension sends a file descriptor.
+    """
+    event = message.get("type")
+    if event == "http.response.pathsend":
+        return True
+    if event in ("http.response.body", "http.response.zerocopysend"):
+        return not message.get("more_body", False)
+    return False
 
 
 def _content_type(headers: Iterable[tuple[bytes, bytes]]) -> Optional[str]:

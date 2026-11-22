@@ -1261,6 +1261,63 @@ class TestMiddleware:
         assert calls == ["lifespan"]
         assert sightings.pending == 0
 
+    @pytest.mark.parametrize("extension", ["pathsend", "zerocopysend"])
+    def test_asgi_reports_a_file_sent_without_a_body_message(
+        self, tmp_path: Path, extension: str
+    ) -> None:
+        page = tmp_path / "index.html"
+        page.write_text("<html></html>")
+
+        async def inner(scope: Any, receive: Any, send: Any) -> None:
+            if extension == "pathsend":
+                # Starlette's FileResponse, where the server offers pathsend.
+                await starlette_responses.FileResponse(page)(scope, receive, send)
+                return
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"text/html")],
+                }
+            )
+            await send(
+                {"type": "http.response.zerocopysend", "file": 3, "more_body": True}
+            )
+            await send({"type": "http.response.zerocopysend", "file": 3})
+
+        recorder = answering()
+        sightings = build(recorder)
+        sent: list[str] = []
+
+        async def receive() -> Any:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message: Any) -> None:
+            sent.append(message["type"])
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "https",
+            "path": "/",
+            "raw_path": b"/",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [
+                (b"host", b"shop.test"),
+                (b"user-agent", GPTBOT.encode()),
+                (b"cf-connecting-ip", b"20.171.206.9"),
+            ],
+            "client": ("192.0.2.1", 50000),
+            "server": ("shop.test", 443),
+            "extensions": {f"http.response.{extension}": {}},
+        }
+        run(sightings.asgi(inner)(scope, receive, send))
+        assert sent[-1] == f"http.response.{extension}"
+        assert sightings.pending == 1
+
     def test_the_response_never_waits_on_a_report(self) -> None:
         release = threading.Event()
         inner = answering()
