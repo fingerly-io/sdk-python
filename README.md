@@ -220,18 +220,17 @@ Do not authorize an action using scores or visitor identifiers supplied by the b
 
 ## Read and write Apple DeviceCheck bits
 
-For an iOS identification whose App Attest evidence carried a DeviceCheck token, Fingerly holds the token for one hour, and a secret key of the same project and environment can spend it once: to read the device's two bits from Apple, or to set them. The bits mean what you decide; Fingerly never stores or reads them.
+For an iOS identification whose App Attest evidence carried DeviceCheck tokens, Fingerly holds two tokens for one hour, a read token and a write token, and a secret key of the same project and environment can spend each once: the read token to read the device's two bits from Apple, the write token to set them. The bits mean what you decide; Fingerly never stores or reads them.
 
-Apple treats a DeviceCheck token as single-use, so a read and a write each need their own identification. A once-per-device free trial takes two:
+Apple treats a DeviceCheck token as single-use, so one identification supports one read and one write. A once-per-device free trial does both on the identification that asks for the trial:
 
-1. Query on the identification that asks for the trial. If the bit says the device already had one, refuse it.
+1. Query the bits. If the bit says the device already had one, refuse it.
 2. Otherwise grant the trial and record the grant in your own data.
-3. Write the bit on the next identification from that install. Until the write lands, your own record of the grant is what stops a second trial.
+3. Write the bit with the same request ID. Until the write lands, your own record of the grant is what stops a second trial.
 
 ```python
 from fingerly import FingerlyDeviceCheckError
 
-# The identification that asks for the trial.
 try:
     bits = fingerly.device_check.query(request_id)
     used_on_device = bits.found and bits.bit0
@@ -240,8 +239,9 @@ except FingerlyDeviceCheckError as error:
         raise
     used_on_device = False  # no answer, not a verdict
 
-# The next identification, after you recorded the grant.
-fingerly.device_check.write(next_request_id, bit0=True)
+if not used_on_device:
+    # Grant the trial in your own data, then mark the device.
+    fingerly.device_check.write(request_id, bit0=True)
 ```
 
 `AsyncFingerly` has the same calls as coroutines. `write` sends only the bits you name; naming neither raises `TypeError` before anything is sent.
@@ -255,7 +255,7 @@ Every non-2xx answer raises `FingerlyDeviceCheckError` (a `FingerlyAPIError`); b
 | `422` | `bits_required` or `apple_rejected` (with Apple's HTTP status in `apple_status`) |
 | `503` | `device_check_unavailable` |
 
-A `503` or a transport failure leaves the token held, and the SDK retries the identical request, at most twice. A held token kept for a retry accepts only the request it was first used for: a retry with the other operation or other bits answers `409 device_check_spent`. No other answer is retried.
+A `503` or a transport failure leaves the token held, and the SDK retries the identical request, at most twice. A held token kept for a retry accepts only the request it was first used for: a second read, or a write with other bits, on that event answers `409 device_check_spent`. No other answer is retried.
 
 ## Verify webhooks
 

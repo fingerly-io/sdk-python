@@ -80,10 +80,11 @@ class FingerlyDeviceCheckError(FingerlyAPIError):
 
     Branch on ``code``:
 
-    - ``device_check_not_held`` (404): no token is held for that event. Decide
+    - ``device_check_not_held`` (404): no token is held for that call. Decide
       without the bits.
-    - ``device_check_spent`` (409): the token was already used, or a retry was
-      not the same request as the first attempt. Use another identification.
+    - ``device_check_spent`` (409): the call's token was already used, a
+      read's by a read or a write's by a write, or a retry was not the same
+      request as the first attempt. Use another identification.
     - ``device_check_busy`` (409): another call is using the token right now.
     - ``credential_unavailable`` (409): the project's Apple key is missing,
       refused by Apple, or has DeviceCheck off. The token is kept.

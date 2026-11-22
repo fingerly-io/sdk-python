@@ -420,11 +420,12 @@ _SIGHTINGS_PATH = "/agents/sightings"
 
 
 class DeviceCheck:
-    """Spends the DeviceCheck token held for an iOS event, once.
+    """Spends the DeviceCheck tokens held for an iOS event, each once.
 
-    Reached as ``fingerly.device_check``. Each held token pays for one Apple
-    call: a read or a write, never both. To read the bits and then set them,
-    read on one identification and write on the next.
+    Reached as ``fingerly.device_check``. An event holds a read token and a
+    write token, and each pays for one Apple call: a read spends the read
+    token, a write the write token. To read the bits and then set them, read
+    and write with the same request ID.
 
     A ``503 device_check_unavailable`` or a transport failure is retried with
     the identical request: a token kept after an answer that was not definite
@@ -435,7 +436,7 @@ class DeviceCheck:
         self._client = client
 
     def query(self, request_id: str) -> DeviceCheckBits:
-        """Reads the device's two bits from Apple, spending the event's token.
+        """Reads the device's two bits from Apple, spending the read token.
 
         Args:
             request_id: The ``request_id`` of an iOS identification made within
@@ -455,7 +456,7 @@ class DeviceCheck:
         bit0: Optional[bool] = None,
         bit1: Optional[bool] = None,
     ) -> DeviceCheckWriteResult:
-        """Sets bit0, bit1 or both with Apple, spending the event's token.
+        """Sets bit0, bit1 or both with Apple, spending the write token.
 
         A bit left as None keeps its value.
 
