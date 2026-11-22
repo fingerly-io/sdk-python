@@ -7,6 +7,7 @@ Fingerly server SDK implements identically.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import socket
@@ -15,6 +16,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
+from wsgiref import handlers as wsgiref_handlers
 
 import httpx
 import pytest
@@ -1269,6 +1271,50 @@ class TestMiddleware:
         assert calls == ["lifespan", "websocket"]
         assert sent == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
         assert sightings.pending == 0
+
+    def test_wsgi_leaves_what_the_server_reads_from_the_body(self) -> None:
+        recorder = answering()
+        sightings = build(recorder)
+        returned: list[Any] = []
+
+        def inner(environ: Any, start_response: Any) -> Any:
+            start_response("200 OK", [("Content-Type", "text/html")])
+            if environ["PATH_INFO"] == "/file":
+                returned.append(environ["wsgi.file_wrapper"](io.BytesIO(b"<p></p>")))
+                return returned[-1]
+            return [b"<html></html>"]
+
+        app = sightings.wsgi(inner)
+        served: list[Any] = []
+
+        def serve(path: str) -> bytes:
+            out = io.BytesIO()
+            environ = {
+                "REQUEST_METHOD": "GET",
+                "PATH_INFO": path,
+                "SERVER_NAME": "shop.test",
+                "SERVER_PORT": "80",
+                "SERVER_PROTOCOL": "HTTP/1.1",
+                "HTTP_USER_AGENT": f"agent{path}",
+                "HTTP_CF_CONNECTING_IP": "20.171.206.9",
+            }
+            handler = wsgiref_handlers.SimpleHandler(
+                io.BytesIO(), out, io.StringIO(), environ
+            )
+
+            def wrapped(environ: Any, start_response: Any) -> Any:
+                served.append(app(environ, start_response))
+                return served[-1]
+
+            handler.run(wrapped)
+            return out.getvalue()
+
+        # wsgiref sets Content-Length for a one-chunk body it can measure.
+        assert b"Content-Length: 13\r\n" in serve("/")
+        # Its file wrapper is recognised by type, so it must come back as is.
+        assert serve("/file").endswith(b"<p></p>")
+        assert served[-1] is returned[-1]
+        assert sightings.pending == 2
 
     @pytest.mark.parametrize("extension", ["pathsend", "zerocopysend"])
     def test_asgi_reports_a_file_sent_without_a_body_message(

@@ -177,7 +177,52 @@ class SightingsWSGI:
                     "report", "Agent sightings could not record a request"
                 )
 
-        return _Closing(self._app(environ, watching), report)
+        return _closing(self._app(environ, watching), report, environ)
+
+
+def _closing(
+    body: Iterable[bytes], after: Callable[[], None], environ: Environ
+) -> Iterable[bytes]:
+    """The response body, calling ``after`` once the server closes it.
+
+    The server must still see what the app returned. Its own file wrapper is
+    handed back as itself, with the hook on its ``close``, because servers
+    recognise it by type to send the file directly (gunicorn, waitress,
+    wsgiref). A sized body stays sized, because waitress and wsgiref set
+    ``Content-Length`` for a one-chunk body by its ``len()``.
+    """
+    file_wrapper = environ.get("wsgi.file_wrapper")
+    if (
+        isinstance(file_wrapper, type)
+        and isinstance(body, file_wrapper)
+        and _hook_close(body, after)
+    ):
+        return body
+    if hasattr(body, "__len__"):
+        return _SizedClosing(body, after)
+    return _Closing(body, after)
+
+
+def _hook_close(body: Any, after: Callable[[], None]) -> bool:
+    """Runs ``after`` when ``body`` is closed, or answers False when it cannot."""
+    original = getattr(body, "close", None)
+    done = False
+
+    def close() -> None:
+        nonlocal done
+        try:
+            if original is not None:
+                original()
+        finally:
+            if not done:
+                done = True
+                after()
+
+    try:
+        body.close = close
+    except (AttributeError, TypeError):
+        return False
+    return True
 
 
 class _Closing:
@@ -200,3 +245,10 @@ class _Closing:
             if not self._done:
                 self._done = True
                 self._after()
+
+
+class _SizedClosing(_Closing):
+    """:class:`_Closing` for a body whose length the server may ask for."""
+
+    def __len__(self) -> int:
+        return len(self._body)  # type: ignore[arg-type]
